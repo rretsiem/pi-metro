@@ -462,11 +462,11 @@ test("TriggerBuffer: runs against a hand-rolled mini-handler (dispatcher-free)",
 
 // ─── default-unchanged sanity check (no import cycle, no side effects) ──────
 
-test("importing triggers does not alter transport.MESSAGE_TYPES or change other modules' surface", () => {
-  // This module is a thin pure-logic layer on top of MessageFrom. Importing
-  // it must not change any of the existing modules' exports, and the
-  // transport "trigger" message-type addition is another agent's scope —
-  // pin the current shape so any unintended drift surfaces here.
+test("post-integration: transport/dispatcher expose the wired trigger surface; triggers.ts exports are intact", () => {
+  // This module is a thin pure-logic layer on top of MessageFrom. Confirms
+  // the integration pass wired "trigger" into MESSAGE_TYPES and onTrigger
+  // into the dispatcher, alongside every other task's additions, without
+  // disturbing triggers.ts's own exports.
   for (const k of [
     "TriggerBuffer",
     "takeBatch",
@@ -483,14 +483,27 @@ test("importing triggers does not alter transport.MESSAGE_TYPES or change other 
       `missing export ${k} on triggers.ts`,
     );
   }
-  // transport surface unchanged: 5 message types, no "trigger" yet
+  // transport surface now includes the Task 04 integration: "trigger" is
+  // wired into MESSAGE_TYPES, and the dispatcher exposes onTrigger.
   assert.deepEqual(
     [...(MESSAGE_TYPES as readonly string[])],
-    ["chat", "query", "ask", "reply", "ack"],
+    [
+      "chat",
+      "query",
+      "ask",
+      "reply",
+      "ack",
+      "progress",
+      "fail",
+      "trigger",
+      "compactReq",
+      "compactRes",
+    ],
   );
-  // dispatcher still has exactly the expected fields; "onTrigger" not added
+  // dispatcher exposes the post-integration callback surface, including
+  // onTrigger (Task 04) alongside the other tasks' additions.
   assert.equal(typeof InboxDispatcher, "function");
-  assert.ok(!("onTrigger" in DispatcherCallbacksShape));
+  assert.ok("onTrigger" in DispatcherCallbacksShape);
   // AskQueue and formatAskPrompt unchanged
   assert.equal(typeof AskQueue, "function");
   assert.equal(typeof formatAskPrompt, "function");
@@ -504,12 +517,13 @@ import * as triggersExports from "../src/triggers.ts";
 // The DispatcherCallbacks interface is erased at runtime; this object is a
 // structural stand-in for the `(typeof cb) === "object"` branch the
 // dispatcher takes to check whether callers supplied a full callback bag.
-// We type-assert that the runtime values flow through unchanged.
+// Post-integration, onTrigger is part of that shape.
 const DispatcherCallbacksShape = {
   onChat: () => undefined,
   onQuery: () => undefined,
   onAsk: () => undefined,
   onReply: () => undefined,
+  onTrigger: () => undefined,
 } as const;
 
 // ─── tiny helpers ─────────────────────────────────────────────────────────

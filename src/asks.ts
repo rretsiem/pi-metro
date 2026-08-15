@@ -296,6 +296,8 @@ export interface EnqueuedAsk {
   status: "queued";
   /** null when the receiver acknowledged; error string otherwise. */
   ack: string | null;
+  /** Resolved target instanceId, so callers can start a liveness monitor without re-resolving. */
+  targetInstanceId: string;
 }
 
 /**
@@ -354,7 +356,7 @@ export async function enqueueAsk(
     updatedAt: Date.now(),
   });
   const ack = await ackWait;
-  return { requestId, status: "queued", ack: ack.error };
+  return { requestId, status: "queued", ack: ack.error, targetInstanceId: r.target.instanceId };
 }
 
 /** Receiver side: acknowledge an incoming ask, correlated to its message ID. */
@@ -389,6 +391,8 @@ export async function replyAsk(
 ): Promise<void> {
   const requestId =
     (msg.payload as { requestId?: unknown })?.requestId ?? msg.id;
+  const truncated =
+    outcome.status === "answered" ? truncateReply(outcome.reply) : null;
   const reply: Message = {
     version: 1,
     id: randomUUID(),
@@ -401,12 +405,83 @@ export async function replyAsk(
     },
     toInstanceId: msg.from.instanceId,
     payload:
-      outcome.status === "answered"
-        ? { requestId, status: "answered", reply: outcome.reply }
-        : { requestId, status: "failed", error: outcome.error },
+      outcome.status === "answered" && truncated
+        ? {
+            requestId,
+            status: "answered",
+            reply: truncated.text,
+            truncated: truncated.truncated,
+          }
+        : {
+            requestId,
+            status: "failed",
+            error: outcome.error,
+            reason: outcome.reason,
+          },
     timestamp: Date.now(),
   };
   await writeMessage(await inboxDir(rootDir, msg.from.instanceId), reply);
+}
+
+/**
+ * Receiver side: informational running-state ping sent once when an
+ * incoming ask's agent run actually starts. Never resolves the sender's
+ * pending ACK/REPLY waiter — it is routed by the dispatcher to `onProgress`
+ * and only bumps the sender's liveness clock / persists "running".
+ */
+export async function sendProgress(
+  rootDir: string,
+  selfEntry: RegistryEntry,
+  msg: Message,
+  requestId: string,
+  note?: string,
+): Promise<void> {
+  const progress: Message = {
+    version: 1,
+    id: randomUUID(),
+    type: "progress",
+    correlationId: requestId,
+    from: {
+      instanceId: selfEntry.instanceId,
+      metroName: selfEntry.metroName,
+      sessionName: selfEntry.sessionName,
+    },
+    toInstanceId: msg.from.instanceId,
+    payload: { requestId, status: "running", note } satisfies ProgressPayload,
+    timestamp: Date.now(),
+  };
+  await writeMessage(await inboxDir(rootDir, msg.from.instanceId), progress);
+}
+
+/**
+ * Receiver side: immediate terminal decline (e.g. `busy` when the incoming
+ * ask queue is full). Unlike the ask flow's `followUp` fallback, this never
+ * queues — it answers right now. Correlates like reply/ack so it can
+ * resolve the sender's pending ACK wait when it arrives in place of one.
+ */
+export async function sendFail(
+  rootDir: string,
+  selfEntry: RegistryEntry,
+  msg: Message,
+  requestId: string,
+  reason: FailReason,
+  error?: string,
+): Promise<void> {
+  const fail: Message = {
+    version: 1,
+    id: randomUUID(),
+    type: "fail",
+    correlationId: requestId,
+    from: {
+      instanceId: selfEntry.instanceId,
+      metroName: selfEntry.metroName,
+      sessionName: selfEntry.sessionName,
+    },
+    toInstanceId: msg.from.instanceId,
+    payload: { requestId, status: "failed", reason, error } satisfies FailPayload,
+    timestamp: Date.now(),
+  };
+  await writeMessage(await inboxDir(rootDir, msg.from.instanceId), fail);
 }
 
 // ===== Liveness =====

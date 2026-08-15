@@ -9,7 +9,18 @@ import {
 import type { CallerRef, Scope } from "./list.ts";
 
 export const MAX_PAYLOAD_BYTES = 64 * 1024;
-export const MESSAGE_TYPES = ["chat", "query", "ask", "reply", "ack"] as const;
+export const MESSAGE_TYPES = [
+  "chat",
+  "query",
+  "ask",
+  "reply",
+  "ack",
+  "progress",
+  "fail",
+  "trigger",
+  "compactReq",
+  "compactRes",
+] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 
 export interface MessageFrom {

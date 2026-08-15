@@ -8,21 +8,29 @@ import { Text } from "@earendil-works/pi-tui";
 import { claimMetroAlias, releaseMetroAlias } from "./identity.ts";
 import { findProjectRoot } from "./project.ts";
 import {
-  cleanupStaleInstanceDirs,
-  readRegistry,
   writeRegistryEntry,
   updateRegistry,
   removeRegistryEntry,
   type RegistryEntry,
 } from "./registry.ts";
 import {
+  STORAGE_SWEEP_INTERVAL_MS,
+  sweepMetrolStorage,
+} from "./sweep.ts";
+import {
   StatusWriter,
   heartbeatDelayMs,
   initialStatus,
 } from "./status.ts";
 import { listSessions, SCOPES, type CallerRef, type ListFilter, type Scope, type SessionInfo } from "./list.ts";
+import { selectPeer } from "./select.ts";
 import { formatSessionRow } from "./cli.ts";
-import { formatMetroInbox, formatMetroMap, formatEntryLine } from "./presentation.ts";
+import {
+  formatMetroInbox,
+  formatMetroMap,
+  formatEntryLine,
+  formatMetroStatus,
+} from "./presentation.ts";
 import { sendDirect, broadcast } from "./messaging.ts";
 import { inboxDir } from "./transport.ts";
 import { InboxDispatcher } from "./dispatcher.ts";
@@ -36,14 +44,33 @@ import {
 import {
   AskQueue,
   ackAsk,
+  applyRankedTransition,
   enqueueAsk,
   extractAskReply,
   findRequest,
   formatAskPrompt,
+  livenessMonitor,
+  rebuildRequests,
   replyAsk,
+  truncateReply,
   type AskOutcome,
+  type FailReason,
+  type LivenessMonitor,
   type RequestRecord,
 } from "./asks.ts";
+import {
+  TriggerBuffer,
+  formatTriggerPrompt,
+  type TriggerItem,
+} from "./triggers.ts";
+import {
+  COMPACT_TIMEOUT_MS,
+  CompactPendingMap,
+  decideCompactResponse,
+  requestCompact,
+  respondCompact,
+  type CompactRequestPayload,
+} from "./compact.ts";
 import type { Message } from "./transport.ts";
 
 const preview = (s: string) => (s.length > 120 ? s.slice(0, 117) + "..." : s);
@@ -353,7 +380,7 @@ export default function metrol(pi: PiLike) {
     name: "metro_list_sessions",
     label: "Metro List Sessions",
     description:
-      "List other live Metrol Pi sessions: cwd = same directory, project (default) = same git root, all = every session.",
+      "List other live Metrol Pi sessions: cwd = same directory, project (default) = same git root, all = every session. Use metro_select_peer to pick the best idle peer (lowest context usage) instead of picking one yourself.",
     parameters: Type.Object({
       scope: Type.Optional(StringEnum(SCOPES, { default: "project" })),
     }),
@@ -371,14 +398,68 @@ export default function metrol(pi: PiLike) {
   });
 
   pi.registerTool({
+    name: "metro_select_peer",
+    label: "Metro Select Peer",
+    description:
+      "Pick the best Metrol peer for an ask or notification: prefer idle, then lower context usage. targetHint (optional) forces a specific metroName or instanceId when present in scope. scope: cwd | project (default) | all.",
+    parameters: Type.Object({
+      targetHint: Type.Optional(Type.String()),
+      scope: Type.Optional(StringEnum(SCOPES, { default: "project" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const caller = await callerRef(ctx.cwd);
+      const scope: Scope = params.scope ?? "project";
+      const all = await listSessions(rootDir, caller, scope);
+      const hint = params.targetHint;
+      const pool = hint
+        ? all.filter((s) => s.metroName === hint || s.instanceId === hint)
+        : all;
+      const picked = selectPeer(pool.length > 0 ? pool : all, caller, { scope });
+      if (!picked) {
+        return {
+          content: [{ type: "text", text: "no peer matched" }],
+          details: { error: "no_peer" },
+        };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(picked, null, 2) }],
+        details: { peer: picked },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "metro_whoami",
+    label: "Metro Whoami",
+    description:
+      "Return the calling session's own Metrol identity (alias, instanceId, sessionName, model, cwd). Use this before composing any message that mentions your own alias — the bus metadata is the source of truth for sender identity, and self-identification in the message body is not verified.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+      if (!selfEntry) {
+        return {
+          content: [{ type: "text", text: "metrol not started yet" }],
+          details: { error: "not_started" },
+        };
+      }
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(selfEntry, null, 2) },
+        ],
+        details: { self: selfEntry },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "metro_publish",
     label: "Metro Publish",
     description:
-      "Send a chat message to another live Metrol session by alias or instanceId, or broadcast with target \"*\". scope: cwd | project (default) | all.",
+      "Send a chat message to another live Metrol session by alias or instanceId, or broadcast with target \"*\". scope: cwd | project (default) | all. triggerTurn=true delivers as an idle-gated user-turn on the receiver (debounced + batched) instead of a plain chat notification — use metro_ask instead if you need a reply back. If you refer to yourself by alias in the message, run metro_whoami first; the bus metadata (Message.from) is the authoritative sender identity for recipients, not anything you type in the body.",
     parameters: Type.Object({
       target: Type.String(),
       message: Type.String(),
       scope: Type.Optional(StringEnum(SCOPES, { default: "project" })),
+      triggerTurn: Type.Optional(Type.Boolean({ default: false })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       if (!selfEntry) {
@@ -388,11 +469,13 @@ export default function metrol(pi: PiLike) {
         };
       }
       const scope: Scope = params.scope ?? "project";
+      const triggerTurn = params.triggerTurn ?? false;
+      const msgType = triggerTurn ? "trigger" : "chat";
       let id: string | null = null;
       let recipients: number;
       try {
         if (params.target === "*") {
-          recipients = await broadcast(rootDir, selfEntry, params.message, scope);
+          recipients = await broadcast(rootDir, selfEntry, params.message, scope, msgType);
         } else {
           id = await sendDirect(
             rootDir,
@@ -400,6 +483,7 @@ export default function metrol(pi: PiLike) {
             params.target,
             params.message,
             scope,
+            msgType,
           );
           recipients = 1;
         }
@@ -410,13 +494,13 @@ export default function metrol(pi: PiLike) {
       pi.appendEntry("metrol:out", {
         id,
         to: params.target,
-        type: "chat",
+        type: msgType,
         preview: preview(params.message),
         timestamp: Date.now(),
       });
       return {
-        content: [{ type: "text", text: JSON.stringify({ id, recipients }) }],
-        details: { id, recipients },
+        content: [{ type: "text", text: JSON.stringify({ id, recipients, triggerTurn }) }],
+        details: { id, recipients, triggerTurn },
       };
     },
   });
@@ -485,7 +569,7 @@ export default function metrol(pi: PiLike) {
     name: "metro_ask",
     label: "Metro Ask",
     description:
-      "Queue a context-aware question on another live Metrol session. Returns immediately with { requestId, status: \"queued\" }; the target agent answers using its own session context and the reply arrives later. Use metro_read(requestId) to poll the state/reply. scope: cwd | project (default) | all.",
+      "Queue a context-aware question on another live Metrol session. Returns immediately with { requestId, status: \"queued\" }; the target agent answers using its own session context and the reply arrives later. Use metro_read(requestId) to poll the state/reply. scope: cwd | project (default) | all. Sender identity on the bus is taken from Message.from, not from the question text — do not introduce your alias into the question body to identify yourself.",
     parameters: Type.Object({
       target: Type.String(),
       question: Type.String(),

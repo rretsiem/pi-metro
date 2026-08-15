@@ -22,6 +22,8 @@ import {
   livenessMonitor,
   rebuildRequests,
   replyAsk,
+  sendFail,
+  sendProgress,
   truncateReply,
 } from "../src/asks.ts";
 
@@ -301,9 +303,18 @@ test("replyAsk writes a reply correlated to the original request", async (t) => 
   const first = byCorrelation.get("req-9");
   const second = byCorrelation.get("req-10");
   assert.equal(first?.type, "reply");
-  assert.deepEqual(first?.payload, { requestId: "req-9", status: "answered", reply: "the answer" });
+  assert.deepEqual(first?.payload, {
+    requestId: "req-9",
+    status: "answered",
+    reply: "the answer",
+    truncated: false,
+  });
   assert.equal(second?.type, "reply");
-  assert.deepEqual(second?.payload, { requestId: "req-10", status: "failed", error: "aborted" });
+  assert.deepEqual(second?.payload, {
+    requestId: "req-10",
+    status: "failed",
+    error: "aborted",
+  });
 });
 
 // extractAskReply: marker-anchored capture of the ask's own run

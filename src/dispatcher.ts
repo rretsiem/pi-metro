@@ -1,12 +1,23 @@
-import { readdir, rm } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { readMessage, type Message } from "./transport.ts";
+import { createWatcher, shouldSkipPoll } from "./watch.ts";
 
 export interface DispatcherCallbacks {
   onChat(msg: Message): void | Promise<void>;
   onQuery?(msg: Message): void | Promise<void>;
   onAsk?(msg: Message): void | Promise<void>;
   onReply?(msg: Message): void | Promise<void>;
+  /** Idle-gated triggerTurn messages (Task 04). */
+  onTrigger?(msg: Message): void | Promise<void>;
+  /** Informational running-state ping for an outgoing ask (Task 03). Never resolves a pending waiter. */
+  onProgress?(msg: Message): void | Promise<void>;
+  /** Terminal failure for an outgoing ask, arriving in place of an ack/reply (Task 03). */
+  onFail?(msg: Message): void | Promise<void>;
+  /** Receiver-side: another session asks us to compact (Task 09). */
+  onCompactRequest?(msg: Message): void | Promise<void>;
+  /** Sender-side: late compactRes arriving with no registered waiter (Task 09). */
+  onCompactResponse?(msg: Message): void | Promise<void>;
 }
 
 export interface ReplyResult {
@@ -29,10 +40,17 @@ export class InboxDispatcher {
   private stopped = false;
   private seen = new Set<string>();
   private pending = new Map<string, (msg: Message) => void>();
+  /** Last inbox-dir mtime we did work for. Null = first poll, never skip. */
+  private lastSeenDirMtime: number | null = null;
+  /** fs.watch handle from createWatcher; undefined when no wake-up hint installed. */
+  private watcherHandle?: { close(): void };
 
   constructor(
     private dir: string,
     cb: DispatcherCallbacks["onChat"] | DispatcherCallbacks,
+    /** Optional low-latency wake-up hint (Task 07). fs.watch is a hint only —
+     * the setInterval poll below remains the delivery guarantee. */
+    private wakeOpts?: { onWakeUp?: () => void },
   ) {
     this.cb = typeof cb === "function" ? { onChat: cb } : cb;
   }
@@ -44,12 +62,25 @@ export class InboxDispatcher {
     }, intervalMs);
     this.timer.unref();
     this.current = this.poll();
+    if (this.wakeOpts?.onWakeUp) {
+      const onWakeUp = this.wakeOpts.onWakeUp;
+      this.watcherHandle = createWatcher(this.dir, {
+        onEvent: onWakeUp,
+        onError: () => {
+          // Best-effort wake-up hint; the interval poll above is the safety
+          // net, so a watcher failure is not fatal. createWatcher already
+          // retries with backoff internally.
+        },
+      });
+    }
   }
 
-  /** Clears the interval and waits for any in-flight tick to finish. */
+  /** Clears the interval and watcher, and waits for any in-flight tick to finish. */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    this.watcherHandle?.close();
+    this.watcherHandle = undefined;
     await this.current;
   }
 
@@ -71,11 +102,20 @@ export class InboxDispatcher {
     if (this.polling || this.stopped) return;
     this.polling = true;
     try {
+      let mtimeMs: number;
+      try {
+        mtimeMs = (await stat(this.dir)).mtimeMs;
+      } catch {
+        return; // no inbox yet
+      }
+      if (shouldSkipPoll(mtimeMs, this.lastSeenDirMtime)) return;
+      this.lastSeenDirMtime = mtimeMs;
+
       let files: string[];
       try {
         files = await readdir(this.dir);
       } catch {
-        return; // no inbox yet
+        return; // disappeared between stat and readdir; next tick retries
       }
       for (const file of files.sort()) {
         if (!file.endsWith(".json") || file.startsWith(".tmp-")) continue;
@@ -108,14 +148,43 @@ export class InboxDispatcher {
       case "ask":
         await this.cb.onAsk?.(msg);
         break;
+      case "trigger":
+        await this.cb.onTrigger?.(msg);
+        break;
+      case "progress":
+        // Informational only — never resolves the ACK/REPLY waiter, always
+        // routed to the persistence callback so the sender can bump its
+        // liveness clock and persist "running".
+        await this.cb.onProgress?.(msg);
+        break;
       case "reply":
-      case "ack": {
+      case "ack":
+      case "fail": {
+        // FAIL can arrive in place of an ACK (immediate busy decline) or in
+        // place of a REPLY (run failure) — it resolves the same pending
+        // correlation as reply/ack. Only route to onFail when no waiter is
+        // registered (late arrival).
+        const waiter = msg.correlationId && this.pending.get(msg.correlationId);
+        if (waiter) {
+          this.pending.delete(msg.correlationId!);
+          waiter(msg);
+        } else if (msg.type === "fail") {
+          await this.cb.onFail?.(msg);
+        } else {
+          await this.cb.onReply?.(msg);
+        }
+        break;
+      }
+      case "compactReq":
+        await this.cb.onCompactRequest?.(msg);
+        break;
+      case "compactRes": {
         const waiter = msg.correlationId && this.pending.get(msg.correlationId);
         if (waiter) {
           this.pending.delete(msg.correlationId!);
           waiter(msg);
         } else {
-          await this.cb.onReply?.(msg);
+          await this.cb.onCompactResponse?.(msg);
         }
         break;
       }

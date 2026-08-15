@@ -22,11 +22,12 @@ async function sendChat(
   callerEntry: RegistryEntry,
   toInstanceId: string,
   message: string,
+  msgType: "chat" | "trigger" = "chat",
 ): Promise<string> {
   const msg: Message = {
     version: 1,
     id: randomUUID(),
-    type: "chat",
+    type: msgType,
     from: senderRef(callerEntry),
     toInstanceId,
     payload: { text: message },
@@ -37,25 +38,27 @@ async function sendChat(
   return msg.id;
 }
 
-/** Write a `chat` message into the target's inbox. Returns the message ID. */
+/** Write a `chat` (or, with triggerTurn wiring, `trigger`) message into the target's inbox. Returns the message ID. */
 export async function sendDirect(
   rootDir: string,
   callerEntry: RegistryEntry,
   target: string,
   message: string,
   scope: Scope = "project",
+  msgType: "chat" | "trigger" = "chat",
 ): Promise<string> {
   const r = resolveTarget(await readRegistry(rootDir), target, callerEntry, scope);
   if (!r.ok) throw new Error(`metrol: ${r.error}`);
-  return sendChat(rootDir, callerEntry, r.target.instanceId, message);
+  return sendChat(rootDir, callerEntry, r.target.instanceId, message, msgType);
 }
 
-/** Write a `chat` to every live session in scope except the caller. Returns recipient count. */
+/** Write a `chat`/`trigger` to every live session in scope except the caller. Returns recipient count. */
 export async function broadcast(
   rootDir: string,
   callerEntry: RegistryEntry,
   message: string,
   scope: Scope = "cwd",
+  msgType: "chat" | "trigger" = "chat",
 ): Promise<number> {
   const entries = await readRegistry(rootDir);
   const recipients = entries.filter(
@@ -67,7 +70,7 @@ export async function broadcast(
           : e.projectRoot === callerEntry.projectRoot)),
   );
   for (const e of recipients) {
-    await sendChat(rootDir, callerEntry, e.instanceId, message);
+    await sendChat(rootDir, callerEntry, e.instanceId, message, msgType);
   }
   return recipients.length;
 }
