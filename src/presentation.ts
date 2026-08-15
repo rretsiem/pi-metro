@@ -1,4 +1,5 @@
 import type { SessionInfo } from "./list.ts";
+import { fmtAgo, fmtContext } from "./cli.ts";
 
 export const MAX_INBOX_ITEMS = 30;
 
@@ -33,8 +34,15 @@ export function formatMetroMap(sessions: SessionInfo[]): string {
     for (const [cwd, group] of [...byCwd].sort(([a], [b]) => a.localeCompare(b))) {
       lines.push(`  ${cwd}`);
       for (const s of [...group].sort((a, b) => a.metroName.localeCompare(b.metroName))) {
-        const label = s.sessionName ? ` · ${s.sessionName}` : "";
-        lines.push(`    ${s.metroName}${label} · ${s.state}`);
+        const segs: string[] = [s.metroName];
+        if (s.sessionName) segs.push(s.sessionName);
+        segs.push(s.state);
+        if (s.activeToolName) segs.push(s.activeToolName);
+        const ctx = fmtContext(s.contextUsage);
+        if (ctx) segs.push(ctx);
+        const ago = fmtAgo(s.lastActivity);
+        if (ago) segs.push(`${ago} ago`);
+        lines.push(`    ${segs.join(" · ")}`);
       }
     }
   }

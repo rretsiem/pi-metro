@@ -8,7 +8,6 @@ import { Text } from "@earendil-works/pi-tui";
 import { claimMetroAlias, releaseMetroAlias } from "./identity.ts";
 import { findProjectRoot } from "./project.ts";
 import {
-  HEARTBEAT_INTERVAL_MS,
   cleanupStaleInstanceDirs,
   readRegistry,
   writeRegistryEntry,
@@ -16,6 +15,11 @@ import {
   removeRegistryEntry,
   type RegistryEntry,
 } from "./registry.ts";
+import {
+  StatusWriter,
+  heartbeatDelayMs,
+  initialStatus,
+} from "./status.ts";
 import { listSessions, SCOPES, type CallerRef, type Scope, type SessionInfo } from "./list.ts";
 import { formatSessionRow } from "./cli.ts";
 import { formatMetroInbox, formatMetroMap, formatEntryLine } from "./presentation.ts";
@@ -84,6 +88,9 @@ export default function metrol(pi: PiLike) {
   const instanceId = randomUUID();
   let selfEntry: RegistryEntry | undefined;
   let dispatcher: InboxDispatcher | undefined;
+  // Status field source of truth; the registry is the durable mirror, the
+  // StatusWriter keeps it in sync as pi events fire. metro_query reads from
+  // selfEntry.lastActivity for the QuerySnapshot.
   let lastActivity = Date.now();
   // Incoming asks: FIFO, one active at a time. askSettled is resolved by the
   // single agent_settled handler registered in session_start.
@@ -562,9 +569,25 @@ export default function metrol(pi: PiLike) {
       state: "idle",
       startedAt: now,
       lastHeartbeat: now,
+      ...initialStatus(now),
     };
     await writeRegistryEntry(rootDir, entry);
     selfEntry = entry;
+    lastActivity = now;
+
+    // Status writer: every status-changing event flows through here so the
+    // registry and the in-memory entry stay in lock-step, with throttling on
+    // non-transition churn and immediate writes on state transitions.
+    const statusWriter = new StatusWriter(rootDir, entry, {
+      now: () => Date.now(),
+      getContextUsage: () => ctx.getContextUsage(),
+      write: async (dir, id, patch) => {
+        await updateRegistry(dir, id, patch).catch(() => {});
+      },
+      setLastActivity: (ts) => {
+        lastActivity = ts;
+      },
+    });
 
     // Incoming ask FIFO: one active ask at a time. The run injects the ask
     // as a user message, waits for that request's run to settle (matched by
@@ -695,35 +718,30 @@ export default function metrol(pi: PiLike) {
       .catch(() => {});
 
     const heartbeat = setInterval(() => {
-      entry.lastHeartbeat = Date.now();
-      updateRegistry(rootDir, instanceId, {
-        lastHeartbeat: entry.lastHeartbeat,
-        state: entry.state,
-      }).catch(() => {});
-    }, HEARTBEAT_INTERVAL_MS);
+      void statusWriter.heartbeat();
+    }, heartbeatDelayMs());
     heartbeat.unref();
 
     pi.on("session_info_changed", (event) => {
       // Never touch metroName; only the mutable display label.
-      entry.sessionName = event.name;
-      updateRegistry(rootDir, instanceId, { sessionName: event.name }).catch(
-        () => {},
-      );
+      void statusWriter.sessionInfoChanged(event.name);
+    });
+
+    pi.on("tool_execution_start", (event) => {
+      void statusWriter.toolStart(event.toolName);
+    });
+    pi.on("tool_execution_end", () => {
+      void statusWriter.toolEnd();
     });
 
     pi.on("agent_start", () => {
-      entry.state = "running";
-      lastActivity = Date.now();
-      updateRegistry(rootDir, instanceId, { state: "running" }).catch(() => {});
+      void statusWriter.agentStart();
     });
-    pi.on("agent_end", () => {
-      entry.state = "idle";
-      lastActivity = Date.now();
-      updateRegistry(rootDir, instanceId, { state: "idle" }).catch(() => {});
-    });
-    // Terminal event for an agent run (retries/compaction/queued
-    // continuations may follow agent_end); resolves the pending ask waiter.
+    // agent_end is intentionally NOT a state transition: agent_settled is
+    // the canonical idle predicate (retries/compaction/queued continuations
+    // may follow agent_end).
     pi.on("agent_settled", () => {
+      void statusWriter.agentSettled();
       askSettled?.();
     });
 

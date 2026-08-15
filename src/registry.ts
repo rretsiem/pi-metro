@@ -18,6 +18,14 @@ export interface RegistryEntry {
   state: "idle" | "running";
   startedAt: number;
   lastHeartbeat: number;
+  /** Epoch ms when state last transitioned; absent on legacy entries. */
+  stateSince?: number;
+  /** Tool currently executing; absent when no tool is running or for legacy entries. */
+  activeToolName?: string;
+  /** Current context usage (tokens / contextWindow); absent when unknown or for legacy entries. */
+  contextUsage?: { tokens: number; contextWindow: number };
+  /** Epoch ms of the last user/agent activity event; absent on legacy entries. */
+  lastActivity?: number;
 }
 
 function registryDir(rootDir: string) {

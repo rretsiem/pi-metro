@@ -20,6 +20,10 @@ export interface SessionInfo {
   state: RegistryEntry["state"];
   lastHeartbeat: number;
   instanceId: string;
+  stateSince?: number;
+  activeToolName?: string;
+  contextUsage?: { tokens: number; contextWindow: number };
+  lastActivity?: number;
 }
 
 /** 0 = same cwd, 1 = same project, 2 = unrelated. */
@@ -40,6 +44,10 @@ function toSessionInfo(e: RegistryEntry): SessionInfo {
     state: e.state,
     lastHeartbeat: e.lastHeartbeat,
     instanceId: e.instanceId,
+    stateSince: e.stateSince,
+    activeToolName: e.activeToolName,
+    contextUsage: e.contextUsage,
+    lastActivity: e.lastActivity,
   };
 }
 
