@@ -1,0 +1,29 @@
+{
+  "name": "pi-metro",
+  "version": "0.1.0",
+  "description": "Inter-session message bus for the Pi coding agent. Live Pi sessions discover each other, exchange chat, fixed queries, and context-aware asks.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "node --test --import tsx test/*.test.ts"
+  },
+  "keywords": [
+    "pi-package",
+    "metrol",
+    "agent",
+    "ipc",
+    "bus"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "typebox": "^1.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

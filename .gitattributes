@@ -1,0 +1,13 @@
+# Normalize line endings for text files.
+* text=auto eol=lf
+
+# Force LF for shell scripts.
+*.sh text eol=lf
+
+# Mark these as binary.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
