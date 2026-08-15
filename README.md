@@ -24,7 +24,7 @@ For automatic discovery, symlink or copy the directory into
 
 ## Commands
 
-- `/metro list [cwd|project|all]` — live sessions (default scope: `project`).
+- `/metro list [cwd|project|all] [--foreground|--exclude-subagents]` — live sessions (default scope: `project`). The `--foreground` flag hides subagents (sessions spawned via `METROL_PARENT_INSTANCE_ID`); `--exclude-subagents` shows only them. Mutually exclusive.
 - `/metro map` — live sessions grouped by project root, cwd, and line.
 - `/metro inbox` — recent Metrol activity (in/out/requests), newest first.
 - `/metro send [--all] <target> <message>` — chat to one session.
@@ -33,8 +33,21 @@ For automatic discovery, symlink or copy the directory into
 - `/metro ask [--all] <target> <question>` — the target agent answers with its own context.
 - `/metro read [requestId]` — request state/reply (queued | accepted | running | answered | failed).
 
-Tools for the agent: `metro_list_sessions`, `metro_publish`, `metro_query`,
-`metro_ask`, `metro_read`.
+Tools for the agent: `metro_list_sessions`, `metro_whoami`, `metro_publish`,
+`metro_query`, `metro_ask`, `metro_read`.
+
+`metro_whoami` returns the calling session's own Metrol identity (alias,
+instanceId, sessionName, model, cwd). Run it before composing any message
+that mentions your own alias — the bus metadata (`Message.from`) is the
+authoritative sender identity for recipients, not anything you type in
+the body.
+
+## Subagent convention
+
+Set `METROL_PARENT_INSTANCE_ID=<parent-instanceId>` in the environment
+when spawning a subagent. The subagent's registry entry will record the
+parent, and `/metro list --exclude-subagents` will surface it. Foreground
+sessions leave the env var unset.
 
 ## Scopes
 
