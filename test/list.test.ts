@@ -140,3 +140,96 @@ test("stale entries (old heartbeat, dead pid) are excluded", async (t) => {
   const sessions = await listSessions(root, CALLER, "all");
   assert.deepEqual(sessions.map((s) => s.instanceId), ["live"]);
 });
+
+test("foregroundOnly: hides entries with a parentInstanceId", async (t) => {
+  const root = await withTempRoot(t);
+  await writeRegistryEntry(root, entry({ instanceId: "me" }));
+  await writeRegistryEntry(root, entry({ instanceId: "fg", metroName: "Blue-1" }));
+  await writeRegistryEntry(
+    root,
+    entry({
+      instanceId: "sub",
+      metroName: "Green-1",
+      parentInstanceId: "some-parent",
+    }),
+  );
+  const sessions = await listSessions(root, CALLER, "all", {
+    foregroundOnly: true,
+  });
+  assert.deepEqual(sessions.map((s) => s.instanceId), ["fg"]);
+});
+
+test("subagentsOnly: keeps only entries with a parentInstanceId", async (t) => {
+  const root = await withTempRoot(t);
+  await writeRegistryEntry(root, entry({ instanceId: "me" }));
+  await writeRegistryEntry(root, entry({ instanceId: "fg", metroName: "Blue-1" }));
+  await writeRegistryEntry(
+    root,
+    entry({
+      instanceId: "sub1",
+      metroName: "Green-1",
+      parentInstanceId: "parent-a",
+    }),
+  );
+  await writeRegistryEntry(
+    root,
+    entry({
+      instanceId: "sub2",
+      metroName: "Pink-1",
+      parentInstanceId: "parent-b",
+    }),
+  );
+  const sessions = await listSessions(root, CALLER, "all", {
+    subagentsOnly: true,
+  });
+  assert.deepEqual(new Set(sessions.map((s) => s.instanceId)), new Set(["sub1", "sub2"]));
+});
+
+test("foregroundOnly wins when both flags are set (and both are no-ops otherwise)", async (t) => {
+  const root = await withTempRoot(t);
+  await writeRegistryEntry(root, entry({ instanceId: "me" }));
+  await writeRegistryEntry(root, entry({ instanceId: "fg", metroName: "Blue-1" }));
+  await writeRegistryEntry(
+    root,
+    entry({
+      instanceId: "sub",
+      metroName: "Green-1",
+      parentInstanceId: "parent",
+    }),
+  );
+  // both: foregroundOnly wins per list.ts contract
+  const both = await listSessions(root, CALLER, "all", {
+    foregroundOnly: true,
+    subagentsOnly: true,
+  });
+  assert.deepEqual(both.map((s) => s.instanceId), ["fg"]);
+  // neither: full list
+  const none = await listSessions(root, CALLER, "all", {});
+  assert.deepEqual(
+    new Set(none.map((s) => s.instanceId)),
+    new Set(["fg", "sub"]),
+  );
+});
+
+test("parentInstanceId is surfaced on SessionInfo", async (t) => {
+  const root = await withTempRoot(t);
+  await writeRegistryEntry(root, entry({ instanceId: "me" }));
+  await writeRegistryEntry(
+    root,
+    entry({
+      instanceId: "sub",
+      metroName: "Green-1",
+      parentInstanceId: "parent-id",
+    }),
+  );
+  const sessions = await listSessions(root, CALLER, "all");
+  const sub = sessions.find((s) => s.instanceId === "sub");
+  assert.equal(sub?.parentInstanceId, "parent-id");
+  const fg = sessions.find((s) => s.instanceId === "me");
+  // caller is excluded; instead check an explicit foreground peer
+  await writeRegistryEntry(root, entry({ instanceId: "fg", metroName: "Blue-1" }));
+  const fg2 = (await listSessions(root, CALLER, "all")).find(
+    (s) => s.instanceId === "fg",
+  );
+  assert.equal(fg2?.parentInstanceId, undefined);
+});

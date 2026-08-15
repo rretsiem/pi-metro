@@ -20,7 +20,7 @@ import {
   heartbeatDelayMs,
   initialStatus,
 } from "./status.ts";
-import { listSessions, SCOPES, type CallerRef, type Scope, type SessionInfo } from "./list.ts";
+import { listSessions, SCOPES, type CallerRef, type ListFilter, type Scope, type SessionInfo } from "./list.ts";
 import { formatSessionRow } from "./cli.ts";
 import { formatMetroInbox, formatMetroMap, formatEntryLine } from "./presentation.ts";
 import { sendDirect, broadcast } from "./messaging.ts";
@@ -110,7 +110,7 @@ export default function metrol(pi: PiLike) {
 
   pi.registerCommand("metro", {
     description:
-      "Metrol bus: /metro list [cwd|project|all] · map · inbox · send [--all] <target> <msg> · broadcast [--project|--all] <msg> · query [--all] <target> <status|last_assistant_text> · ask [--all] <target> <question> · read [requestId]",
+      "Metrol bus: /metro list [cwd|project|all] [--foreground|--exclude-subagents] · map · inbox · send [--all] <target> <msg> · broadcast [--project|--all] <msg> · query [--all] <target> <status|last_assistant_text> · ask [--all] <target> <question> · read [requestId]",
     handler: async (args, ctx) => {
       const parts = (args ?? "").trim().split(/\s+/).filter(Boolean);
       const sub = parts.shift();
@@ -141,20 +141,41 @@ export default function metrol(pi: PiLike) {
         return;
       }
       if (sub === "list") {
-        const scope = parts[0] ?? "project";
-        if (!(SCOPES as readonly string[]).includes(scope)) {
+        // Extract --foreground / --exclude-subagents anywhere in args;
+        // first non-flag token is the scope (default project).
+        let foregroundOnly = false;
+        let subagentsOnly = false;
+        const positional: string[] = [];
+        for (const p of parts) {
+          if (p === "--foreground") foregroundOnly = true;
+          else if (p === "--exclude-subagents") subagentsOnly = true;
+          else positional.push(p);
+        }
+        if (foregroundOnly && subagentsOnly) {
           ctx.ui.notify(
-            `Unknown scope "${parts[0]}" — use cwd, project, or all`,
+            "--foreground and --exclude-subagents are mutually exclusive",
             "warning",
           );
           return;
         }
+        const scope = (positional[0] ?? "project") as string;
+        if (!(SCOPES as readonly string[]).includes(scope)) {
+          ctx.ui.notify(
+            `Unknown scope "${positional[0]}" — use cwd, project, or all`,
+            "warning",
+          );
+          return;
+        }
+        const filter: ListFilter = { foregroundOnly, subagentsOnly };
         const sessions = await listSessions(
           rootDir,
           await callerRef(ctx.cwd),
           scope as Scope,
+          filter,
         );
-        const header = `${sessions.length} metrol session(s) · scope ${scope}`;
+        const header = `${sessions.length} metrol session(s) · scope ${scope}${
+          foregroundOnly ? " · foreground" : subagentsOnly ? " · subagents" : ""
+        }`;
         ctx.ui.notify(
           [header, ...sessions.map(formatSessionRow)].join("\n"),
           "info",
@@ -556,6 +577,7 @@ export default function metrol(pi: PiLike) {
 
     const projectRoot = await findProjectRoot(ctx.cwd);
     const now = Date.now();
+    const parentInstanceId = process.env.METROL_PARENT_INSTANCE_ID || undefined;
     const entry: RegistryEntry = {
       version: 1,
       instanceId,
@@ -569,6 +591,7 @@ export default function metrol(pi: PiLike) {
       state: "idle",
       startedAt: now,
       lastHeartbeat: now,
+      parentInstanceId,
       ...initialStatus(now),
     };
     await writeRegistryEntry(rootDir, entry);

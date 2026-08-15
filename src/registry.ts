@@ -26,6 +26,8 @@ export interface RegistryEntry {
   contextUsage?: { tokens: number; contextWindow: number };
   /** Epoch ms of the last user/agent activity event; absent on legacy entries. */
   lastActivity?: number;
+  /** Instance ID of the spawning session (subagent convention). Absent for foreground sessions. */
+  parentInstanceId?: string;
 }
 
 function registryDir(rootDir: string) {
@@ -104,6 +106,45 @@ export async function removeRegistryEntry(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
+}
+
+/**
+ * Remove registry files whose PID is dead AND whose heartbeat is stale.
+ * Bypasses `readRegistry()`'s filtering by reading each JSON file directly
+ * and applying the same staleness test. A live PID with a fresh heartbeat
+ * is never a deletion candidate. Returns the removed instance IDs. Every
+ * `rm` uses `force: true`, so concurrent sweeps never throw on already-
+ * deleted files.
+ */
+export async function sweepStaleRegistryFiles(
+  rootDir: string,
+): Promise<string[]> {
+  const dir = registryDir(rootDir);
+  let files: string[];
+  try {
+    files = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const now = Date.now();
+  const removed: string[] = [];
+  for (const file of files) {
+    if (!file.endsWith(".json") || file.startsWith(".tmp-")) continue;
+    const filePath = path.join(dir, file);
+    let entry: RegistryEntry;
+    try {
+      entry = JSON.parse(await readFile(filePath, "utf8"));
+    } catch {
+      // Corrupt/unreadable: skip — mirrors readRegistry's behavior.
+      continue;
+    }
+    const stale = now - entry.lastHeartbeat > STALE_THRESHOLD_MS;
+    const dead = !pidAlive(entry.pid);
+    if (!stale || !dead) continue;
+    await rm(filePath, { force: true });
+    removed.push(entry.instanceId);
+  }
+  return removed;
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   updateRegistry,
   removeRegistryEntry,
   pidAlive,
+  sweepStaleRegistryFiles,
   STALE_THRESHOLD_MS,
   type RegistryEntry,
 } from "../src/registry.ts";
@@ -92,4 +93,57 @@ test("removeRegistryEntry removes the file; idempotent", async (t) => {
   assert.deepEqual(await readRegistry(root), []);
   await removeRegistryEntry(root, entry.instanceId); // no throw
   await removeRegistryEntry(root, randomUUID()); // never existed
+});
+
+test("sweepStaleRegistryFiles removes a stale + dead entry", async (t) => {
+  const root = await withTempRoot(t);
+  const stale = makeEntry({
+    pid: 99999999,
+    lastHeartbeat: Date.now() - STALE_THRESHOLD_MS - 1000,
+  });
+  await writeRegistryEntry(root, stale);
+  const removed = await sweepStaleRegistryFiles(root);
+  assert.deepEqual(removed, [stale.instanceId]);
+});
+
+test("sweepStaleRegistryFiles keeps an entry with a fresh heartbeat + live PID", async (t) => {
+  const root = await withTempRoot(t);
+  const live = makeEntry({ pid: process.pid, lastHeartbeat: Date.now() });
+  await writeRegistryEntry(root, live);
+  const removed = await sweepStaleRegistryFiles(root);
+  assert.deepEqual(removed, []);
+  assert.equal((await readRegistry(root)).length, 1);
+});
+
+test("sweepStaleRegistryFiles keeps an entry with stale heartbeat but live PID", async (t) => {
+  const root = await withTempRoot(t);
+  const live = makeEntry({
+    pid: process.pid,
+    lastHeartbeat: Date.now() - STALE_THRESHOLD_MS - 1000,
+  });
+  await writeRegistryEntry(root, live);
+  const removed = await sweepStaleRegistryFiles(root);
+  assert.deepEqual(removed, []);
+});
+
+test("sweepStaleRegistryFiles keeps an entry with fresh heartbeat but dead PID", async (t) => {
+  const root = await withTempRoot(t);
+  // Fresh heartbeat but dead PID — must NOT be deleted; readRegistry also keeps it.
+  const entry = makeEntry({ pid: 99999999, lastHeartbeat: Date.now() });
+  await writeRegistryEntry(root, entry);
+  const removed = await sweepStaleRegistryFiles(root);
+  assert.deepEqual(removed, []);
+});
+
+test("sweepStaleRegistryFiles is idempotent under repeated calls", async (t) => {
+  const root = await withTempRoot(t);
+  const stale = makeEntry({
+    pid: 99999999,
+    lastHeartbeat: Date.now() - STALE_THRESHOLD_MS - 1000,
+  });
+  await writeRegistryEntry(root, stale);
+  const first = await sweepStaleRegistryFiles(root);
+  const second = await sweepStaleRegistryFiles(root);
+  assert.deepEqual(first, [stale.instanceId]);
+  assert.deepEqual(second, []);
 });

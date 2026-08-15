@@ -1,22 +1,40 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { writeRegistryEntry, type RegistryEntry } from "../src/registry.ts";
 import { inboxDir, readMessage, type Message } from "../src/transport.ts";
 import { InboxDispatcher } from "../src/dispatcher.ts";
 import {
   AskQueue,
+  MAX_ASK_QUEUE_DEPTH,
+  REPLY_PAYLOAD_MAX_BYTES,
+  STATE_RANK,
+  applyRankedTransition,
   ackAsk,
   askMarker,
   enqueueAsk,
   extractAskReply,
   findRequest,
   formatAskPrompt,
+  livenessMonitor,
   rebuildRequests,
   replyAsk,
+  truncateReply,
 } from "../src/asks.ts";
+
+const waitFor = async (
+  cond: () => boolean | Promise<boolean>,
+  timeoutMs = 3000,
+): Promise<void> => {
+  const start = Date.now();
+  while (!(await cond())) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timeout");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
 
 async function withTempRoot(t: import("node:test").TestContext) {
   const root = await mkdtemp(path.join(tmpdir(), "metrol-ask-test-"));
@@ -337,4 +355,370 @@ test("extractAskReply reports aborted/error runs as failed", () => {
 
   const noAssistant = [{ type: "message", message: { role: "user", content: marker } }];
   assert.deepEqual(extractAskReply(noAssistant, "req-1"), { status: "failed", error: "no assistant response" });
+});
+
+// ===== Task 03: Resilient remote asks =====
+
+test("extractAskReply: aborted with partial text returns answered (not failed)", () => {
+  const marker = askMarker("req-1");
+  const branch = [
+    { type: "message", message: { role: "user", content: marker } },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "partial answer" }],
+        stopReason: "aborted",
+        errorMessage: "user aborted",
+      },
+    },
+  ];
+  assert.deepEqual(extractAskReply(branch, "req-1"), { status: "answered", reply: "partial answer" });
+});
+
+test("extractAskReply: error stopReason returns failed with run_failed, ignoring partial text", () => {
+  const marker = askMarker("req-1");
+  const branch = [
+    { type: "message", message: { role: "user", content: marker } },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "partial" }],
+        stopReason: "error",
+        errorMessage: "something broke",
+      },
+    },
+  ];
+  assert.deepEqual(extractAskReply(branch, "req-1"), {
+    status: "failed",
+    error: "run_failed",
+    reason: "run_failed",
+  });
+});
+
+test("rebuildRequests: malformed entries (missing requestId or status) are skipped", () => {
+  const entries = [
+    customEntry({ requestId: "a", status: "queued", updatedAt: 1 }),
+    customEntry({ requestId: "b" }),                      // missing status
+    customEntry({ status: "queued" }),                    // missing requestId
+    customEntry({}),                                      // missing both
+    null,
+    undefined,
+    { type: "custom", customType: "metrol:request", data: null },
+    customEntry({ requestId: "c", status: "answered", updatedAt: 2 }),
+  ];
+  const all = rebuildRequests(entries);
+  assert.equal(all.length, 2);
+  assert.deepEqual(all.map((r) => r.requestId).sort(), ["a", "c"]);
+});
+
+test("rebuildRequests: equal updatedAt deterministically orders by later index", () => {
+  const entries = [
+    customEntry({ requestId: "a", status: "queued", updatedAt: 100 }),
+    customEntry({ requestId: "b", status: "queued", updatedAt: 100 }),
+    customEntry({ requestId: "c", status: "queued", updatedAt: 100 }),
+  ];
+  const all = rebuildRequests(entries);
+  // Same timestamp: later index wins (c, b, a)
+  assert.deepEqual(all.map((r) => r.requestId), ["c", "b", "a"]);
+});
+
+test("truncateReply: text under 60 KiB is unchanged and not flagged", () => {
+  const r = truncateReply("hi");
+  assert.deepEqual(r, { text: "hi", truncated: false });
+  const exact = truncateReply("x".repeat(REPLY_PAYLOAD_MAX_BYTES));
+  assert.equal(exact.truncated, false);
+  assert.equal(exact.text.length, REPLY_PAYLOAD_MAX_BYTES);
+});
+
+test("truncateReply: text over 60 KiB is truncated and flagged", () => {
+  const text = "x".repeat(70 * 1024);
+  const r = truncateReply(text);
+  assert.equal(r.truncated, true);
+  assert.ok(Buffer.byteLength(r.text, "utf8") <= REPLY_PAYLOAD_MAX_BYTES);
+  assert.ok(r.text.length < text.length);
+});
+
+test("truncateReply: respects multi-byte character boundaries (UTF-8)", () => {
+  // 16384 emojis = 65536 bytes > 60 KiB; truncation must not split a codepoint
+  const text = "🎉".repeat(16384);
+  const r = truncateReply(text);
+  assert.equal(r.truncated, true);
+  assert.ok(Buffer.byteLength(r.text, "utf8") <= REPLY_PAYLOAD_MAX_BYTES);
+  // every kept codepoint is a whole emoji
+  assert.match(r.text, /^(🎉)*$/);
+});
+
+test("AskQueue.MAX_ASK_QUEUE_DEPTH: enqueue returns true for first 4, false for the 5th", async () => {
+  const q = new AskQueue<string>(async () => {
+    // never resolves
+  });
+  assert.equal(q.enqueue("a"), true);
+  assert.equal(q.enqueue("b"), true);
+  assert.equal(q.enqueue("c"), true);
+  assert.equal(q.enqueue("d"), true);
+  assert.equal(q.enqueue("e"), false);
+  assert.equal(MAX_ASK_QUEUE_DEPTH, 4);
+});
+
+test("AskQueue: completing the active run reopens a slot", async () => {
+  let resolveRun!: () => void;
+  const q = new AskQueue<string>(
+    () => new Promise<void>((r) => { resolveRun = r; }),
+  );
+  assert.equal(q.enqueue("a"), true);
+  assert.equal(q.enqueue("b"), true);
+  assert.equal(q.enqueue("c"), true);
+  assert.equal(q.enqueue("d"), true);
+  assert.equal(q.enqueue("e"), false);
+  resolveRun();
+  await new Promise((r) => setTimeout(r, 20));
+  // "a" finished, "b" is now active; slot reopened
+  assert.equal(q.enqueue("f"), true);
+});
+
+test("applyRankedTransition: higher rank wins for non-terminal", () => {
+  assert.equal(STATE_RANK.queued, 0);
+  assert.equal(STATE_RANK.accepted, 1);
+  assert.equal(STATE_RANK.running, 2);
+  assert.equal(STATE_RANK.answered, 3);
+  assert.equal(STATE_RANK.failed, 3);
+  assert.equal(applyRankedTransition("queued", "accepted"), "accepted");
+  assert.equal(applyRankedTransition("accepted", "running"), "running");
+  assert.equal(applyRankedTransition("queued", "running"), "running");
+});
+
+test("applyRankedTransition: lower rank is ignored", () => {
+  assert.equal(applyRankedTransition("accepted", "queued"), "accepted");
+  assert.equal(applyRankedTransition("running", "accepted"), "running");
+  assert.equal(applyRankedTransition("running", "queued"), "running");
+});
+
+test("applyRankedTransition: terminal states are sticky (current wins)", () => {
+  assert.equal(applyRankedTransition("answered", "failed"), "answered");
+  assert.equal(applyRankedTransition("failed", "answered"), "failed");
+  assert.equal(applyRankedTransition("answered", "queued"), "answered");
+  assert.equal(applyRankedTransition("answered", "running"), "answered");
+  assert.equal(applyRankedTransition("failed", "running"), "failed");
+  assert.equal(applyRankedTransition("failed", "queued"), "failed");
+});
+
+test("applyRankedTransition: incoming terminal wins over non-terminal current", () => {
+  assert.equal(applyRankedTransition("queued", "answered"), "answered");
+  assert.equal(applyRankedTransition("running", "failed"), "failed");
+  assert.equal(applyRankedTransition("accepted", "failed"), "failed");
+});
+
+test("livenessMonitor: target_gone when registry removes the target", async () => {
+  const entry: RegistryEntry = {
+    version: 1,
+    instanceId: "bob",
+    metroName: "Bob",
+    cwd: "/tmp",
+    projectRoot: "/tmp",
+    pid: process.pid,
+    state: "idle",
+    startedAt: Date.now(),
+    lastHeartbeat: Date.now(),
+  };
+  let live: RegistryEntry[] = [entry];
+  const failures: string[] = [];
+  const m = livenessMonitor({
+    requestId: "r1",
+    targetInstanceId: "bob",
+    rootDir: "/tmp",
+    onFailure: (r) => failures.push(r),
+    intervalMs: 10,
+    inactivityTimeoutMs: 1000,
+    readRegistry: async () => live,
+  });
+  m.start();
+  await new Promise((r) => setTimeout(r, 30));
+  live = [];
+  await new Promise((r) => setTimeout(r, 30));
+  m.stop();
+  assert.ok(failures.includes("target_gone"));
+});
+
+test("livenessMonitor: liveness_timeout when heartbeat never advances", async () => {
+  const entry: RegistryEntry = {
+    version: 1,
+    instanceId: "bob",
+    metroName: "Bob",
+    cwd: "/tmp",
+    projectRoot: "/tmp",
+    pid: process.pid,
+    state: "idle",
+    startedAt: Date.now(),
+    lastHeartbeat: Date.now(),
+  };
+  const failures: string[] = [];
+  const m = livenessMonitor({
+    requestId: "r1",
+    targetInstanceId: "bob",
+    rootDir: "/tmp",
+    onFailure: (r) => failures.push(r),
+    intervalMs: 10,
+    inactivityTimeoutMs: 50,
+    readRegistry: async () => [entry],
+  });
+  m.start();
+  await new Promise((r) => setTimeout(r, 120));
+  m.stop();
+  assert.ok(failures.includes("liveness_timeout"));
+});
+
+test("livenessMonitor: deadline_exceeded after hard ceiling", async () => {
+  const entry: RegistryEntry = {
+    version: 1,
+    instanceId: "bob",
+    metroName: "Bob",
+    cwd: "/tmp",
+    projectRoot: "/tmp",
+    pid: process.pid,
+    state: "idle",
+    startedAt: Date.now(),
+    lastHeartbeat: Date.now(),
+  };
+  const failures: string[] = [];
+  const m = livenessMonitor({
+    requestId: "r1",
+    targetInstanceId: "bob",
+    rootDir: "/tmp",
+    onFailure: (r) => failures.push(r),
+    intervalMs: 10,
+    inactivityTimeoutMs: 1000,
+    hardCeilingMs: 50,
+    readRegistry: async () => [entry],
+  });
+  m.start();
+  await new Promise((r) => setTimeout(r, 120));
+  m.stop();
+  assert.ok(failures.includes("deadline_exceeded"));
+});
+
+test("livenessMonitor: recordEvent resets the inactivity clock", async () => {
+  const entry: RegistryEntry = {
+    version: 1,
+    instanceId: "bob",
+    metroName: "Bob",
+    cwd: "/tmp",
+    projectRoot: "/tmp",
+    pid: process.pid,
+    state: "idle",
+    startedAt: Date.now(),
+    lastHeartbeat: Date.now(),
+  };
+  const failures: string[] = [];
+  const m = livenessMonitor({
+    requestId: "r1",
+    targetInstanceId: "bob",
+    rootDir: "/tmp",
+    onFailure: (r) => failures.push(r),
+    intervalMs: 5,
+    inactivityTimeoutMs: 50,
+    readRegistry: async () => [entry],
+  });
+  m.start();
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 15));
+    m.recordEvent();
+  }
+  m.stop();
+  assert.deepEqual(failures, []);
+});
+
+test("livenessMonitor: heartbeat advance resets the inactivity clock", async () => {
+  let hb = Date.now();
+  const failures: string[] = [];
+  const m = livenessMonitor({
+    requestId: "r1",
+    targetInstanceId: "bob",
+    rootDir: "/tmp",
+    onFailure: (r) => failures.push(r),
+    intervalMs: 5,
+    inactivityTimeoutMs: 50,
+    readRegistry: async () => [
+      {
+        version: 1,
+        instanceId: "bob",
+        metroName: "Bob",
+        cwd: "/tmp",
+        projectRoot: "/tmp",
+        pid: process.pid,
+        state: "idle",
+        startedAt: Date.now(),
+        lastHeartbeat: hb,
+      },
+    ],
+  });
+  m.start();
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 15));
+    hb = Date.now(); // heartbeat advances
+  }
+  m.stop();
+  assert.deepEqual(failures, []);
+});
+
+test("enqueueAsk: self-target is rejected before any write", async (t) => {
+  const root = await withTempRoot(t);
+  await writeRegistryEntry(root, CALLER);
+  const bobInbox = await inboxDir(root, "bob");
+  const meInbox = await inboxDir(root, "me");
+  const dispatcher = new InboxDispatcher(meInbox, () => {});
+  dispatcher.start(10);
+  t.after(() => dispatcher.stop());
+
+  const persisted: { status: string; error?: string }[] = [];
+  // CALLER.metroName is "Red-1"; resolveTarget filters out the caller's instanceId,
+  // so self-target comes back as "not found" instead of accepting an ask to ourselves.
+  await assert.rejects(
+    () =>
+      enqueueAsk(
+        root, dispatcher, CALLER, "Red-1", "hi", "project",
+        (d) => persisted.push(d), 100,
+      ),
+    /not found/,
+  );
+  assert.equal(persisted[0]?.status, "failed");
+  // No file written to the target's inbox
+  assert.equal(
+    (await readdir(bobInbox)).filter((f) => f.endsWith(".json")).length,
+    0,
+  );
+});
+
+test("dispatcher: malformed chat message is rejected and its file removed", async (t) => {
+  const root = await withTempRoot(t);
+  const dir = await inboxDir(root, "target-1");
+  const received: Message[] = [];
+  const d = new InboxDispatcher(dir, (m) => {
+    received.push(m);
+  });
+  d.start(10);
+  t.after(() => d.stop());
+
+  // Write a malformed message directly (invalid version)
+  const file = path.join(dir, `${Date.now()}-bad.json`);
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 2,
+      type: "chat",
+      id: randomUUID(),
+      from: { instanceId: "sender", metroName: "x" },
+      toInstanceId: "target-1",
+      payload: { text: "hi" },
+      timestamp: Date.now(),
+    }),
+  );
+
+  await waitFor(
+    async () => (await readdir(dir)).filter((f) => f.endsWith(".json")).length === 0,
+  );
+  await d.stop();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(received.length, 0);
 });

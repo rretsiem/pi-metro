@@ -7,6 +7,11 @@ export const LINES = [
 ];
 export const MAX_RUN = 99;
 
+/** Grace window after a claim: protects a session that has just claimed an
+ *  alias but hasn't written its first registry entry yet (so it isn't in the
+ *  live-instance-id set) from having its claim swept out from under it. */
+export const CLAIM_SWEEP_GRACE_MS = 15_000;
+
 interface Owner {
   instanceId: string;
   claimedAt: number;
@@ -89,13 +94,20 @@ export async function staleClaimsCleanup(
   } catch {
     return removed;
   }
+  const now = Date.now();
   for (const name of entries) {
     const dir = path.join(claimsDir(rootDir), name);
     const owner = await readOwner(dir);
-    if (!owner || !validInstanceIds.has(owner.instanceId)) {
+    if (!owner) {
+      // Corrupt claim (no owner.json): treat as stale.
       await rm(dir, { recursive: true, force: true });
       removed.push(name);
+      continue;
     }
+    if (validInstanceIds.has(owner.instanceId)) continue;
+    if (now - owner.claimedAt < CLAIM_SWEEP_GRACE_MS) continue;
+    await rm(dir, { recursive: true, force: true });
+    removed.push(name);
   }
   return removed;
 }

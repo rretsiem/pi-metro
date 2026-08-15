@@ -24,6 +24,15 @@ export interface SessionInfo {
   activeToolName?: string;
   contextUsage?: { tokens: number; contextWindow: number };
   lastActivity?: number;
+  parentInstanceId?: string;
+}
+
+/** Visibility filters on top of scope. Both false = no filtering. */
+export interface ListFilter {
+  /** Keep only sessions with no parentInstanceId (foreground). */
+  foregroundOnly?: boolean;
+  /** Keep only sessions that have a parentInstanceId (subagents). */
+  subagentsOnly?: boolean;
 }
 
 /** 0 = same cwd, 1 = same project, 2 = unrelated. */
@@ -48,25 +57,30 @@ function toSessionInfo(e: RegistryEntry): SessionInfo {
     activeToolName: e.activeToolName,
     contextUsage: e.contextUsage,
     lastActivity: e.lastActivity,
+    parentInstanceId: e.parentInstanceId,
   };
 }
 
 /**
  * Live sessions visible to `caller`, always excluding the caller.
  * Sorted by rank (same cwd, same project, rest); Array.sort is stable,
- * so relative order within a rank is preserved.
+ * so relative order within a rank is preserved. `filter` applies on top
+ * of `scope` and is mutually exclusive (`foregroundOnly` wins).
  */
 export async function listSessions(
   rootDir: string,
   caller: CallerRef,
   scope: Scope = "project",
+  filter: ListFilter = {},
 ): Promise<SessionInfo[]> {
   const entries = await readRegistry(rootDir);
   const visible = entries.filter(
     (e) =>
       e.instanceId !== caller.instanceId &&
       (scope === "all" ||
-        (scope === "cwd" ? e.cwd === caller.cwd : e.projectRoot === caller.projectRoot)),
+        (scope === "cwd" ? e.cwd === caller.cwd : e.projectRoot === caller.projectRoot)) &&
+      (filter.foregroundOnly ? !e.parentInstanceId : true) &&
+      (filter.subagentsOnly && !filter.foregroundOnly ? !!e.parentInstanceId : true),
   );
   return visible
     .sort((a, b) => rank(a, caller) - rank(b, caller))

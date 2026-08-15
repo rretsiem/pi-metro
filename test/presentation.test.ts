@@ -4,9 +4,11 @@ import {
   formatMetroMap,
   formatMetroInbox,
   formatEntryLine,
+  formatMetroStatus,
   MAX_INBOX_ITEMS,
 } from "../src/presentation.ts";
 import type { SessionInfo } from "../src/list.ts";
+import type { RequestRecord } from "../src/asks.ts";
 
 let n = 0;
 function session(over: Partial<SessionInfo>): SessionInfo {
@@ -126,4 +128,99 @@ test("formatEntryLine renders all four metrol custom types", () => {
     /Blue-1.*answered.*done/,
   );
   assert.equal(formatEntryLine("unknown", {}), null);
+});
+
+// --- /metro status --- a pure renderer that takes everything pre-fetched.
+
+function req(over: Partial<RequestRecord>): RequestRecord {
+  return {
+    requestId: "req-x",
+    target: "Blue-1",
+    status: "queued",
+    updatedAt: Date.now(),
+    ...over,
+  };
+}
+
+test("status renders self section with alias/session/cwd/project/state/tool/ctx/ago", () => {
+  const self = session({
+    metroName: "Red-1",
+    sessionName: "main",
+    cwd: "/work/app/api",
+    projectRoot: "/work/app",
+    state: "running",
+    activeToolName: "metro_publish",
+    contextUsage: { tokens: 45_000, contextWindow: 272_000 },
+    lastActivity: Date.now() - 5 * 60_000, // 5m ago
+  });
+  const out = formatMetroStatus(self, [], []);
+  assert.ok(out.includes("Red-1"));
+  assert.ok(out.includes("main"));
+  assert.ok(out.includes("running"));
+  assert.ok(out.includes("metro_publish"));
+  assert.ok(out.includes("45K/272K"));
+  assert.ok(out.includes("5m ago"));
+  assert.ok(out.includes("/work/app/api"));
+  assert.ok(out.includes("/work/app"));
+});
+
+test("status renders peers section in the same line format as formatMetroMap", () => {
+  const self = session({ metroName: "Red-1" });
+  const peers = [
+    session({
+      metroName: "Blue-1",
+      sessionName: "auth",
+      cwd: "/work/app/api",
+      projectRoot: "/work/app",
+      state: "idle",
+      activeToolName: "metro_list_sessions",
+      contextUsage: { tokens: 12_000, contextWindow: 272_000 },
+    }),
+  ];
+  const out = formatMetroStatus(self, peers, []);
+  // header from formatMetroMap must appear ("Metro map" — that's only in map)
+  // status reuses the per-session segments only:
+  //   alias · session · state · tool · ctx
+  assert.ok(out.includes("Blue-1"));
+  assert.ok(out.includes("auth"));
+  assert.ok(out.includes("idle"));
+  assert.ok(out.includes("metro_list_sessions"));
+  assert.ok(out.includes("12K/272K"));
+  // cwd grouping line (project root label) must also appear because
+  // status delegates the peers block to formatMetroMap.
+  assert.ok(out.includes("/work/app"));
+});
+
+test("status surfaces non-terminal asks from recentRequests", () => {
+  const self = session({ metroName: "Red-1" });
+  const r = req({
+    requestId: "abc123",
+    target: "Blue-1",
+    status: "running",
+    question: "are you ready?",
+    updatedAt: Date.now(),
+  });
+  const out = formatMetroStatus(self, [], [r]);
+  assert.match(out, /ask running .*Blue-1/);
+  assert.ok(out.includes("are you ready?"));
+});
+
+test("status surfaces recent failures, capped to the last few", () => {
+  const self = session({ metroName: "Red-1" });
+  const failures: RequestRecord[] = Array.from({ length: 10 }, (_, i) =>
+    req({
+      requestId: `req-${i.toString().padStart(2, "0")}`,
+      target: "Blue-1",
+      status: "failed",
+      error: `boom-${i}`,
+      updatedAt: Date.now() - i * 1000,
+    }),
+  );
+  const out = formatMetroStatus(self, [], failures);
+  // most recent failure (i=0) must be present
+  assert.ok(out.includes("boom-0"));
+  // cap kicks in — older failures drop
+  assert.ok(!out.includes("boom-7"));
+  // section header surfaces the count
+  assert.match(out, /recent failures/);
 });
