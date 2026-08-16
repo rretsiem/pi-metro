@@ -45,14 +45,43 @@ jobs:
 
       # Mirror the npm publish as a GitHub Release so the Releases page
       # stays in sync with the registry. Tagged-push only; workflow_dispatch
-      # has no tag to release from.
+      # has no tag to release from. Notes come from the matching section of
+      # CHANGELOG.md (so the prose you curate in one place shows up on
+      # GitHub *and* in the npm tarball — same source of truth). Falls back
+      # to `--generate-notes` (auto commit list) if a section is missing.
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          echo "Creating GitHub Release for $TAG"
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES_FILE="$(mktemp)"
+          # Slice the matching `## VERSION` block out of CHANGELOG.md
+          # (stops at the next `## ` header so it doesn't leak the older
+          # section). Strip leading "## " and the trailing " - DATE"
+          # before the version comparison so pre-release suffixes like
+          # `0.2.3-rc.0` match exactly.
+          awk -v v="$VERSION" '
+            BEGIN { p = 0 }
+            /^## / {
+              if (p) exit
+              line = $0
+              sub(/^## /, "", line)
+              sub(/ .*/, "", line)
+              if (line == v) p = 1
+            }
+            p
+          ' CHANGELOG.md > "$NOTES_FILE"
+
+          if [ -s "$NOTES_FILE" ]; then
+            echo "Using curated notes from CHANGELOG.md for $VERSION"
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$NOTES_FILE"
+          else
+            echo "::warning::No CHANGELOG entry for $VERSION; falling back to --generate-notes"
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
