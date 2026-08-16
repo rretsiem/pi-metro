@@ -1,7 +1,11 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { readMessage, type Message } from "./transport.ts";
-import { createWatcher, shouldSkipPoll } from "./watch.ts";
+import {
+  createWatcher,
+  shouldSkipPoll,
+  type DirFingerprint,
+} from "./watch.ts";
 
 export interface DispatcherCallbacks {
   onChat(msg: Message): void | Promise<void>;
@@ -55,8 +59,10 @@ export class InboxDispatcher {
   private seen: string[] = [];
   private seenIndex = new Set<string>();
   private pending = new Map<string, (msg: Message) => void>();
-  /** Last inbox-dir mtime we did work for. Null = first poll, never skip. */
-  private lastSeenDirMtime: number | null = null;
+  /** Last inbox-dir fingerprint we did work for. Null = first poll, never skip.
+   * Composite (mtime + file-count + total-size) so weird FSes that rewind
+   * mtime (NFS, FAT, `touch -d`) can't trick us into skipping a real change. */
+  private lastSeenFingerprint: DirFingerprint | null = null;
   /** fs.watch handle from createWatcher; undefined when no wake-up hint installed. */
   private watcherHandle?: { close(): void };
 
@@ -123,8 +129,6 @@ export class InboxDispatcher {
       } catch {
         return; // no inbox yet
       }
-      if (shouldSkipPoll(mtimeMs, this.lastSeenDirMtime)) return;
-      this.lastSeenDirMtime = mtimeMs;
 
       let files: string[];
       try {
@@ -132,6 +136,25 @@ export class InboxDispatcher {
       } catch {
         return; // disappeared between stat and readdir; next tick retries
       }
+      let totalSize = 0;
+      for (const f of files) {
+        if (f.startsWith(".tmp-")) continue;
+        try {
+          const s = await stat(path.join(this.dir, f));
+          totalSize += s.size;
+        } catch {
+          // disappeared mid-poll; treat as size 0 so we don't under-count
+          // — the next tick re-stat and the fingerprint will move.
+        }
+      }
+      const fingerprint: DirFingerprint = {
+        mtimeMs,
+        fileCount: files.length,
+        totalSize,
+      };
+      if (shouldSkipPoll(fingerprint, this.lastSeenFingerprint)) return;
+      this.lastSeenFingerprint = fingerprint;
+
       for (const file of files.sort()) {
         if (!file.endsWith(".json") || file.startsWith(".tmp-")) continue;
         const fp = path.join(this.dir, file);

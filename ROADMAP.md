@@ -99,7 +99,7 @@ and any new tests must be added in the same commit.
         `METROL_DISABLE_SWEEP=1` in `process.env` causes
         `sweepMetrolStorage` to be a no-op (or the `index.ts` wiring to not
         schedule the timer).
-- [ ] **D2. `shouldSkipPoll` mtime fingerprint** — `src/watch.ts`. Replace
+- [x] **D2. `shouldSkipPoll` mtime fingerprint** — `src/watch.ts`. Replace
       the single `mtimeMs <= lastSeen` check with a combined fingerprint
       (mtime + file-count + size) so a backward mtime step on weird FSes
       (NFS, FAT) doesn't skip forever.

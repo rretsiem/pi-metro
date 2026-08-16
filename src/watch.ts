@@ -10,17 +10,39 @@ export const DEBOUNCE_MS = 50;
 export const BACKOFF_STEPS_MS: readonly number[] = [250, 1000, 5000, 30000];
 
 /**
- * Pure predicate: a poll can skip work when the directory's mtime hasn't moved
- * since the last poll. A null `lastSeenMtimeMs` (first poll) never skips —
- * there is no prior baseline to compare against.
+ * A snapshot of "did this inbox dir actually change?" — directory mtime
+ * alone is too weak (NFS/FAT filesystems can rewind mtime on rewrite;
+ * `touch -d` and copy-restore both do this). Combine mtime with cheap
+ * shape signals (file count + total size) so a backward mtime step that
+ * actually changes the contents still wakes the poll.
+ */
+export interface DirFingerprint {
+  mtimeMs: number;
+  fileCount: number;
+  totalSize: number;
+}
+
+/**
+ * Pure predicate: a poll can skip work when the directory's fingerprint
+ * is dominated by the last-seen one. mtime uses `<=` (matches the original
+ * semantic: a backward mtime step with no other change is a no-op), while
+ * file-count and total-size use `===` so a real content change always
+ * wakes the poll. A null `lastSeen` (first poll) never skips — there is
+ * no prior baseline to compare against.
  */
 export function shouldSkipPoll(
-  dirMtimeMs: number,
-  lastSeenMtimeMs: number | null,
+  fingerprint: DirFingerprint,
+  lastSeen: DirFingerprint | null,
 ): boolean {
-  if (lastSeenMtimeMs === null) return false;
-  return dirMtimeMs <= lastSeenMtimeMs;
+  if (lastSeen === null) return false;
+  return (
+    fingerprint.mtimeMs <= lastSeen.mtimeMs &&
+    fingerprint.fileCount === lastSeen.fileCount &&
+    fingerprint.totalSize === lastSeen.totalSize
+  );
 }
+
+
 
 /**
  * Minimal surface createWatcher needs from an fs.watch-like emitter.

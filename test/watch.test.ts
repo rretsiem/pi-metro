@@ -9,6 +9,7 @@ import {
   DEBOUNCE_MS,
   createWatcher,
   shouldSkipPoll,
+  type DirFingerprint,
   type WatchFn,
   type WatcherLike,
 } from "../src/watch.ts";
@@ -58,23 +59,46 @@ function makeFakeWatch(): { watchFn: WatchFn; watches: FakeHandle[] } {
   return { watchFn, watches };
 }
 
-// ---------- shouldSkipPoll ----------
+// ---------- shouldSkipPoll (fingerprint) ----------
 
-test("shouldSkipPoll: equal mtimes skip", () => {
-  assert.equal(shouldSkipPoll(100, 100), true);
+const fp = (mtimeMs: number, fileCount = 0, totalSize = 0): DirFingerprint => ({
+  mtimeMs,
+  fileCount,
+  totalSize,
 });
 
-test("shouldSkipPoll: older-or-equal lastSeen skips", () => {
-  assert.equal(shouldSkipPoll(100, 150), true);
+test("shouldSkipPoll: equal fingerprints skip", () => {
+  assert.equal(shouldSkipPoll(fp(100, 3, 1024), fp(100, 3, 1024)), true);
 });
 
-test("shouldSkipPoll: newer dir mtime does not skip", () => {
-  assert.equal(shouldSkipPoll(200, 100), false);
+test("shouldSkipPoll: newer mtime does not skip", () => {
+  assert.equal(shouldSkipPoll(fp(200, 3, 1024), fp(100, 3, 1024)), false);
+});
+
+test("shouldSkipPoll: older mtime alone does NOT skip when shape unchanged — caught by fileCount/totalSize", () => {
+  // Identical shape but mtime went backward — still skip, no real change.
+  assert.equal(shouldSkipPoll(fp(50, 3, 1024), fp(100, 3, 1024)), true);
+});
+
+test("shouldSkipPoll: older mtime + identical shape still skips (no real change)", () => {
+  // If fileCount and totalSize are unchanged and mtime rewinds, the dir
+  // contents really are identical — skipping is correct. This is the
+  // cheap-but-safe baseline; the next two tests cover the cases where a
+  // backward mtime step actually changed something.
+  assert.equal(shouldSkipPoll(fp(50, 3, 1024), fp(100, 3, 1024)), true);
+});
+
+test("shouldSkipPoll: older mtime + different fileCount does not skip (regression: NFS mtime rewind)", () => {
+  assert.equal(shouldSkipPoll(fp(50, 4, 1024), fp(100, 3, 1024)), false);
+});
+
+test("shouldSkipPoll: older mtime + different totalSize does not skip", () => {
+  assert.equal(shouldSkipPoll(fp(50, 3, 2048), fp(100, 3, 1024)), false);
 });
 
 test("shouldSkipPoll: null lastSeen never skips (first poll)", () => {
-  assert.equal(shouldSkipPoll(0, null), false);
-  assert.equal(shouldSkipPoll(1_000_000, null), false);
+  assert.equal(shouldSkipPoll(fp(0), null), false);
+  assert.equal(shouldSkipPoll(fp(1_000_000, 5, 10_000), null), false);
 });
 
 // ---------- createWatcher constants ----------
