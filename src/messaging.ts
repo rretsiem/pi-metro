@@ -69,8 +69,13 @@ export async function broadcast(
           ? e.cwd === callerEntry.cwd
           : e.projectRoot === callerEntry.projectRoot)),
   );
-  for (const e of recipients) {
-    await sendChat(rootDir, callerEntry, e.instanceId, message, msgType);
-  }
+  // Writes are atomic per recipient (temp + rename), so concurrent sends
+  // are safe: each recipient's inbox is independent. Parallelizing turns
+  // a 50-peer broadcast from ~50× single-disk-write latency to one.
+  await Promise.all(
+    recipients.map((e) =>
+      sendChat(rootDir, callerEntry, e.instanceId, message, msgType),
+    ),
+  );
   return recipients.length;
 }

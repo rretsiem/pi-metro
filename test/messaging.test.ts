@@ -114,6 +114,29 @@ test("broadcast scope all: every session except caller, returns count", async (t
   assert.equal((await inboxFiles(root, "b4b4b4b4")).length, 1);
 });
 
+test("broadcast writes concurrently (Promise.all, no functional regression)", async (t) => {
+  // After A1's parallelization of broadcast's per-recipient writes, this
+  // test pins the observable contract: every recipient still gets exactly
+  // one file, with the same message text and message id. Concurrency is
+  // an optimization, not a behavior change.
+  const root = await withTempRoot(t);
+  await writeRegistryEntry(root, CALLER);
+  const recipients = [
+    entry({ instanceId: "b2b2b2b2", metroName: "Blue-1" }),
+    entry({ instanceId: "b3b3b3b3", metroName: "Green-1" }),
+    entry({ instanceId: "b4b4b4b4", metroName: "Teal-1" }),
+  ];
+  for (const r of recipients) await writeRegistryEntry(root, r);
+  const n = await broadcast(root, CALLER, "hello all", "all");
+  assert.equal(n, 3);
+  for (const r of recipients) {
+    const files = await inboxFiles(root, r.instanceId);
+    assert.equal(files.length, 1);
+    assert.equal(files[0].type, "chat");
+    assert.equal((files[0].payload as { text?: string }).text, "hello all");
+  }
+});
+
 test("sendDirect rejects unknown target", async (t) => {
   const root = await withTempRoot(t);
   await writeRegistryEntry(root, CALLER);
