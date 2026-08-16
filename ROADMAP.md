@@ -69,6 +69,15 @@ No open S-tier items. Next code work is the M-tier list below. Tagging
 
 ### Tier M — medium effort (50–150 LoC each)
 
+- [x] **E1. `metro_delegate` wrapper** — `src/delegate.ts`. Composes
+      `metro_select_peer` + `metro_ask` into one call. Honors `targetHint`,
+      auto-picks idle peer with lowest context usage, returns `{requestId,
+      target}` immediately (or blocks for the reply when `waitForReply`).
+      Adds `metrol:handoff` audit entry on the caller side. Useful for the
+      "I'm near context limit, hand this off" workflow.
+      - Test: `test/delegate.test.ts` — 9 cases: no-idle-peer, auto-pick,
+        hint-forces-target, blocking waits for terminal states (answered,
+        failed, timeout), scope=all.
 - [ ] **M1. `metro_log` (audit trail)** — every outbound write + every
       inbound route gets a single-line log entry under `metrol:log` for
       debugging cross-process issues. New `src/log.ts` + small integration

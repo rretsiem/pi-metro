@@ -43,6 +43,7 @@ import {
   renewLease,
 } from "./leases.ts";
 import { InboxDispatcher } from "./dispatcher.ts";
+import { runDelegate, type DelegateResult } from "./delegate.ts";
 import {
   QUERY_KINDS,
   answerQuery,
@@ -806,6 +807,68 @@ export default function metrol(pi: PiLike) {
   });
 
   pi.registerTool({
+    name: "metro_delegate",
+    label: "Metro Delegate",
+    description:
+      "Send a task to an idle peer (lowest context usage preferred) and optionally wait for the result. Composes metro_select_peer + metro_ask. scope: cwd | project (default) | all. targetHint forces a specific peer. waitForReply blocks until the answer lands (or timeoutMs).",
+    parameters: Type.Object({
+      question: Type.String(),
+      scope: Type.Optional(StringEnum(SCOPES, { default: "project" })),
+      targetHint: Type.Optional(Type.String()),
+      waitForReply: Type.Optional(Type.Boolean({ default: false })),
+      timeoutMs: Type.Optional(Type.Number()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!selfEntry || !dispatcher) {
+        return {
+          content: [{ type: "text", text: "metrol not started yet" }],
+          details: { error: "not_started" },
+        };
+      }
+      const caller = await callerRef(ctx.cwd);
+      const result: DelegateResult = await runDelegate({
+        rootDir,
+        dispatcher,
+        callerEntry: selfEntry,
+        caller,
+        options: {
+          question: params.question,
+          scope: params.scope ?? "project",
+          targetHint: params.targetHint,
+          waitForReply: params.waitForReply ?? false,
+          timeoutMs: params.timeoutMs,
+        },
+        appendAskEntry: (data) => pi.appendEntry("metrol:request", data),
+        appendHandoffEntry: (data) => pi.appendEntry("metrol:handoff", data),
+        getEntries: () => ctx.sessionManager.getEntries(),
+      });
+      if (!result.ok) {
+        return {
+          content: [{ type: "text", text: `no idle peer in scope ${result.scope}` }],
+          details: { error: result.error, scope: result.scope },
+        };
+      }
+      if (result.status === "queued") {
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          details: result,
+        };
+      }
+      const isTimeout = result.status === "timeout";
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result),
+          },
+        ],
+        details: result,
+        ...(isTimeout ? { isError: false } : {}),
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "metro_query",
     label: "Metro Query",
     description:
@@ -972,6 +1035,7 @@ export default function metrol(pi: PiLike) {
     "metrol:request",
     "metrol:in",
     "metrol:out",
+    "metrol:handoff",
   ]) {
     pi.registerEntryRenderer(customType, (entry) => {
       const line = formatEntryLine(customType, entry.data);

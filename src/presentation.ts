@@ -122,6 +122,11 @@ export function formatEntryLine(customType: string, data: any): string | null {
       const body = d.error ?? d.reply ?? d.question ?? "";
       return `[metro] ${kind} ${d.target ?? "?"} · ${d.status ?? "?"}${body ? `: ${compact(body)}` : ""}`;
     }
+    case "metrol:handoff": {
+      const blocking = d.blocking ? " (blocking)" : "";
+      const id = typeof d.requestId === "string" ? ` · ${d.requestId.slice(0, 8)}` : "";
+      return `[metro] delegate → ${d.target ?? "?"}${id}${blocking}`;
+    }
     default:
       return null;
   }
