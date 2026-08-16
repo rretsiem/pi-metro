@@ -35,4 +35,15 @@ jobs:
       # token from the workflow environment when registry auth is missing
       # AND the repo is configured as a Trusted Publisher on npmjs.com.
       - name: Publish to npm
-        run: npm publish --access public
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # Stable versions (no '-') land on 'latest'; pre-release
+          # versions (e.g. 0.2.2-rc.0) land on 'next' because npm refuses
+          # to publish pre-releases to 'latest' without an explicit tag.
+          if [[ "$VERSION" == *-* ]]; then
+            TAG="next"
+          else
+            TAG="latest"
+          fi
+          echo "Publishing $VERSION to '$TAG'"
+          npm publish --access public --tag "$TAG"
