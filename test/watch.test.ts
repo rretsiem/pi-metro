@@ -167,7 +167,7 @@ test("createWatcher: close() cancels pending backoff", async (t) => {
   });
   t.after(() => w.close());
   await waitFor(() => watches.length === 1);
-  watches[0].watcher.emit("error", new Error("x"));
+  watches[0].watcher.emit("error", new Error("abcdef01"));
   // Close during the backoff window — no retry must happen
   w.close();
   await sleep(300);

@@ -88,7 +88,7 @@ test("inbox caps at MAX_INBOX_ITEMS", () => {
 });
 
 test("inbox truncates long/multiline previews", () => {
-  const long = "x".repeat(500) + "\nsecond line\nthird line";
+  const long = "abcdef01".repeat(500) + "\nsecond line\nthird line";
   const out = formatMetroInbox([
     custom("metrol:out", { to: "Blue-1", preview: long, timestamp: 1 }),
   ]);

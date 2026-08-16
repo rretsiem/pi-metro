@@ -4,7 +4,7 @@ import path from "node:path";
 import { readRegistry, type RegistryEntry } from "./registry.ts";
 import type { Scope } from "./list.ts";
 import {
-  inboxDir,
+  safeInboxDir,
   resolveTarget,
   type Message,
   type MessageFrom,
@@ -259,10 +259,8 @@ export async function requestCompact(
 
   const wait = pending.register(requestId, timeoutMs);
   try {
-    await writeCompactMessage(
-      await inboxDir(rootDir, r.target.instanceId),
-      msg,
-    );
+    const inbox = await safeInboxDir(rootDir, r.target.instanceId);
+    await writeCompactMessage(inbox, msg);
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
@@ -360,7 +358,7 @@ export async function respondCompact(
     timestamp: Date.now(),
   } as Message;
   await writeCompactMessage(
-    await inboxDir(rootDir, msg.from.instanceId),
+    await safeInboxDir(rootDir, msg.from.instanceId),
     reply,
   );
 }

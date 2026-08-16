@@ -32,7 +32,7 @@ import {
   formatMetroStatus,
 } from "./presentation.ts";
 import { sendDirect, broadcast } from "./messaging.ts";
-import { inboxDir } from "./transport.ts";
+import { safeInboxDir } from "./transport.ts";
 import { InboxDispatcher } from "./dispatcher.ts";
 import {
   QUERY_KINDS,
@@ -886,17 +886,28 @@ export default function metrol(pi: PiLike) {
         return;
       }
       // ponytail: waits until a settled run contains this request's marker;
-      // if the followUp is never delivered (crash) this hangs until shutdown.
+      // if the followUp is never delivered (the documented Pi platform race
+      // where steered/followUp messages sent mid-run can be dropped), this
+      // hangs forever — the deadline below caps it so the queue slot
+      // releases and the next queued ask can proceed.
+      const ASK_DEADLINE_MS = 5 * 60 * 1000;
       const outcome = await new Promise<AskOutcome>((resolve) => {
+        let deadline: ReturnType<typeof setTimeout> | undefined;
         const check = () => {
           const o = extractAskReply(ctx.sessionManager.getBranch(), requestId);
           if (o) {
+            if (deadline) clearTimeout(deadline);
             askSettled = null;
             resolve(o);
           }
         };
         askSettled = check;
         check();
+        deadline = setTimeout(() => {
+          askSettled = null;
+          resolve({ status: "failed", error: "deadline_exceeded", reason: "deadline_exceeded" });
+        }, ASK_DEADLINE_MS);
+        deadline.unref?.();
       });
       if (outcome.status === "answered") {
         persist("answered", { reply: outcome.reply });
@@ -944,7 +955,7 @@ export default function metrol(pi: PiLike) {
     };
 
     dispatcher = new InboxDispatcher(
-      await inboxDir(rootDir, instanceId),
+      await safeInboxDir(rootDir, instanceId),
       {
       onChat: (msg) => {
         const p = msg.payload as { text?: unknown };
@@ -1132,11 +1143,13 @@ export default function metrol(pi: PiLike) {
     // silently stranded by the documented Pi platform race (steering/followUp
     // messages sent mid-run can be dropped), agent_settled for that specific
     // run may never fire. Re-check on agent_end too, but only when the
-    // runtime has told us no retry/compaction/continuation is pending
-    // (willRetry === false) — checking during a pending retry risks resolving
-    // the ask on a partial/failed attempt right before a successful retry.
+    // runtime has explicitly told us `willRetry === false` (checking during
+    // a pending retry risks resolving the ask on a partial/failed attempt
+    // right before a successful retry). The `event?.willRetry === false`
+    // guard, not `!event?.willRetry`, so a missing willRetry field is treated
+    // as "not safe to fire" rather than "safe to fire".
     pi.on("agent_end", (event) => {
-      if (!event?.willRetry) askSettled?.();
+      if (event?.willRetry === false) askSettled?.();
     });
 
     pi.on("session_shutdown", async () => {

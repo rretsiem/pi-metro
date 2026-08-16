@@ -78,7 +78,7 @@ test("takeBatch: empty input → empty batch with 0 bytes", () => {
 test("takeBatch: first oversized item is included alone, rest deferred", () => {
   // item[0] is bigger than the 16 KiB budget by itself
   const items: TriggerItem[] = [
-    item("Blue-1", "x".repeat(TRIGGER_BATCH_MAX_BYTES + 1000)),
+    item("Blue-1", "abcdef01".repeat(TRIGGER_BATCH_MAX_BYTES + 1000)),
     item("Blue-2", "small-2"),
     item("Blue-3", "small-3"),
     item("Blue-4", "small-4"),
@@ -86,7 +86,7 @@ test("takeBatch: first oversized item is included alone, rest deferred", () => {
   const b = takeBatch(items);
   assert.equal(b.items.length, 1);
   assert.equal(b.items[0].from.metroName, "Blue-1");
-  assert.equal(b.bytes, utf8Len("x".repeat(TRIGGER_BATCH_MAX_BYTES + 1000)));
+  assert.equal(b.bytes, utf8Len("abcdef01".repeat(TRIGGER_BATCH_MAX_BYTES + 1000)));
 });
 
 test("takeBatch: 25 items → first 20, next 5 (byte cap is not the limiter)", () => {
@@ -104,7 +104,7 @@ test("takeBatch: 25 items → first 20, next 5 (byte cap is not the limiter)", (
 });
 
 test("takeBatch: items total bytes < 16 KiB lands them all in one batch", () => {
-  // 20 items, 100 bytes each → 2000 bytes total → all in one batch
+  // 20 items, exactly 100 bytes each → 2000 bytes total → all in one batch
   const items: TriggerItem[] = Array.from({ length: 20 }, (_, i) =>
     item(`Blue-${i}`, "x".repeat(100)),
   );
@@ -116,7 +116,7 @@ test("takeBatch: items total bytes < 16 KiB lands them all in one batch", () => 
 test("takeBatch: byte cap is inclusive — exactly 16 KiB fits", () => {
   // item[0] is 16 KiB; item[1] is empty — total stays 16 KiB → both included
   const items: TriggerItem[] = [
-    item("Blue-1", "y".repeat(TRIGGER_BATCH_MAX_BYTES)),
+    item("Blue-1", "x".repeat(TRIGGER_BATCH_MAX_BYTES)),
     item("Blue-2", ""),
   ];
   const b = takeBatch(items);
@@ -127,7 +127,7 @@ test("takeBatch: byte cap is inclusive — exactly 16 KiB fits", () => {
 test("takeBatch: byte cap is exceeded by a single byte → next item deferred", () => {
   // item[0] is 16 KiB - 1; item[1] is 2 bytes → 16 KiB + 1 → item[1] deferred
   const items: TriggerItem[] = [
-    item("Blue-1", "y".repeat(TRIGGER_BATCH_MAX_BYTES - 1)),
+    item("Blue-1", "x".repeat(TRIGGER_BATCH_MAX_BYTES - 1)),
     item("Blue-2", "ab"),
     item("Blue-3", "small"),
   ];
@@ -170,10 +170,10 @@ test("formatTriggerPrompt: metroName alone when sessionName is undefined", () =>
 });
 
 test("formatTriggerPrompt: singular vs plural wording for batch size", () => {
-  const one = formatTriggerPrompt([item("Blue-1", "x")]);
+  const one = formatTriggerPrompt([item("Blue-1", "abcdef01")]);
   const many = formatTriggerPrompt([
-    item("Blue-1", "x"),
-    item("Blue-2", "y"),
+    item("Blue-1", "abcdef01"),
+    item("Blue-2", "abcdef0c"),
   ]);
   assert.match(one, /1 peer message\b/);
   assert.match(many, /2 peer messages\b/);
@@ -267,9 +267,9 @@ test("TriggerBuffer: byte cap forces a split — 20-item cap has room but text c
   // only item[0]. The remaining 20 small items (2000 bytes total) flow
   // into batch 2.
   const items: TriggerItem[] = [
-    item("Blue-0", "a".repeat(TRIGGER_BATCH_MAX_BYTES - 50)),
+    item("Blue-0", "abcdef0d".repeat(TRIGGER_BATCH_MAX_BYTES - 50)),
     ...Array.from({ length: 20 }, (_, i) =>
-      item(`Blue-${i + 1}`, "x".repeat(100)),
+      item(`Blue-${i + 1}`, "abcdef01".repeat(100)),
     ),
   ];
   const r = makeRecorder();
@@ -378,7 +378,7 @@ test("TriggerBuffer: an oversized-first item still ends up in batch 1 (not batch
     deliver: r.deliver,
     deliverFollowUp: r.deliverFollowUp,
   });
-  b.enqueue(item("Blue-1", "x".repeat(TRIGGER_BATCH_MAX_BYTES + 500)));
+  b.enqueue(item("Blue-1", "abcdef01".repeat(TRIGGER_BATCH_MAX_BYTES + 500)));
   b.enqueue(item("Blue-2", "small-2"));
   b.enqueue(item("Blue-3", "small-3"));
   await waitFor(() => r.calls.length === 2, 2000);
@@ -440,12 +440,12 @@ test("TriggerBuffer: runs against a hand-rolled mini-handler (dispatcher-free)",
   // Two peer-message arrives "in order" through the fake dispatcher
   const a = {
     type: "trigger",
-    from: { instanceId: "x", metroName: "Blue-1", sessionName: "auth" },
+    from: { instanceId: "abcdef01", metroName: "Blue-1", sessionName: "auth" },
     content: "ping from Blue-1",
   };
   const b = {
     type: "trigger",
-    from: { instanceId: "y", metroName: "Red-2" },
+    from: { instanceId: "abcdef0c", metroName: "Red-2" },
     content: "ping from Red-2",
   };
   fakeRoute(a);

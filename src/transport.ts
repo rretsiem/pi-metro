@@ -44,12 +44,47 @@ export type Result<T extends object = object> =
   | ({ ok: true } & T)
   | { ok: false; error: string };
 
-/** Target inbox path; created if missing. */
+/** Strict instanceId shape: hex string 8–64 chars, with optional hyphen
+ * separators (full UUID v4 layout). Covers bare 8-hex prefixes (the
+ * registry's short-id form) and full UUID v4 (with or without hyphens).
+ * Used to gate every path-segment that ends up in `path.join` so peer-supplied
+ * `instanceId` (in `from.instanceId`, in registry entries, in `toInstanceId`)
+ * cannot escape `~/.pi/agent/metrol/` via `../`-style traversal. */
+export const INSTANCE_ID_PATTERN = /^[0-9a-fA-F]{8,64}$/;
+export const INSTANCE_ID_PATTERN_UUID = /^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+
+export function validateInstanceId(id: unknown): id is string {
+  if (typeof id !== "string") return false;
+  if (id.length < 8 || id.length > 64) return false;
+  return INSTANCE_ID_PATTERN.test(id) || INSTANCE_ID_PATTERN_UUID.test(id);
+}
+
+/** Verify the resolved path is inside `rootDir`. Returns the resolved path
+ * on success, or null on escape. Defense-in-depth for path traversal: even
+ * if a future regex relaxation let a slash-bearing `instanceId` through,
+ * `path.resolve` + a prefix check would still refuse it. */
+export function pathInsideRoot(
+  rootDir: string,
+  ...segments: string[]
+): string | null {
+  const resolved = path.resolve(rootDir, ...segments);
+  const root = path.resolve(rootDir);
+  if (resolved === root) return resolved;
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  return resolved.startsWith(prefix) ? resolved : null;
+}
+
+/** Target inbox path; created if missing. Rejects any `instanceId` that
+ * would escape the metrol root via path traversal. Returns null on
+ * refusal; callers must handle the null case as a write-don't-resolve
+ * outcome (treat the same as "unknown target"). */
 export async function inboxDir(
   rootDir: string,
   instanceId: string,
-): Promise<string> {
-  const dir = path.join(rootDir, "instances", instanceId, "inbox");
+): Promise<string | null> {
+  if (!validateInstanceId(instanceId)) return null;
+  const dir = pathInsideRoot(rootDir, "instances", instanceId, "inbox");
+  if (dir === null) return null;
   await mkdir(dir, { recursive: true });
   return dir;
 }
@@ -60,6 +95,16 @@ export function validateMessage(msg: Message): Result {
   }
   if (!(MESSAGE_TYPES as readonly string[]).includes(msg.type)) {
     return { ok: false, error: `unknown type "${msg.type}"` };
+  }
+  // Trust boundary: every peer-supplied `instanceId` is shape-checked before
+  // it can reach a path-join or a registry read. The regex matches either a
+  // bare 8+ hex prefix or a full UUID v4, which is what the bus uses. Slash
+  // chars, NULs, "..", and anything else is rejected here.
+  if (
+    !validateInstanceId(msg.from?.instanceId) ||
+    !validateInstanceId(msg.toInstanceId)
+  ) {
+    return { ok: false, error: "invalid instanceId" };
   }
   const bytes = Buffer.byteLength(JSON.stringify(msg.payload ?? null));
   if (bytes > MAX_PAYLOAD_BYTES) {
@@ -81,6 +126,23 @@ export async function writeMessage(
   const file = `${msg.timestamp}-${msg.id}.json`;
   await rename(tmp, path.join(dir, file));
   return { ok: true, file };
+}
+
+/** Resolve the target's inbox directory, throwing a clear error if the
+ * resolved path is rejected (malformed instanceId or root-escape). Use
+ * this at every outbound write site so a future call without the
+ * `inboxDir` validation can't silently no-op. */
+export async function safeInboxDir(
+  rootDir: string,
+  instanceId: string,
+): Promise<string> {
+  const dir = await inboxDir(rootDir, instanceId);
+  if (dir === null) {
+    throw new Error(
+      `metrol: refusing to write to inbox with invalid instanceId: ${instanceId}`,
+    );
+  }
+  return dir;
 }
 
 export async function readMessage(filePath: string): Promise<Result<{ msg: Message }>> {

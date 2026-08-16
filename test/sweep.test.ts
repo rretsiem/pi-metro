@@ -172,10 +172,10 @@ test("sweepMetrolStorage does not touch anything outside rootDir", async (t) => 
   const outsideDir = await mkdtemp(path.join(tmpdir(), "metrol-outside-"));
   t.after(() => rm(outsideDir, { recursive: true, force: true }));
   const sessionJsonl = path.join(outsideDir, "session.jsonl");
-  await writeFile(sessionJsonl, '{"keep":"me"}');
+  await writeFile(sessionJsonl, '{"keep":"a1a1a1a1"}');
 
   // Add some stale data inside rootDir so the sweep has work to do.
-  await mkdir(path.join(root, "instances", "stale-dir"), { recursive: true });
+  await mkdir(path.join(root, "instances", "dead1234"), { recursive: true });
   await writeRegistryEntry(
     root,
     makeEntry({
@@ -187,7 +187,7 @@ test("sweepMetrolStorage does not touch anything outside rootDir", async (t) => 
   await sweepMetrolStorage(root);
 
   // The outside file must be byte-identical.
-  assert.equal(await readFile(sessionJsonl, "utf8"), '{"keep":"me"}');
+  assert.equal(await readFile(sessionJsonl, "utf8"), '{"keep":"a1a1a1a1"}');
 });
 
 test("sweepMetrolStorage is idempotent when called twice sequentially", async (t) => {
@@ -199,7 +199,7 @@ test("sweepMetrolStorage is idempotent when called twice sequentially", async (t
   await writeRegistryEntry(root, staleReg);
   const staleClaim = await claimMetroAlias(root, randomUUID());
   await backdateClaim(root, staleClaim);
-  await mkdir(path.join(root, "instances", "stale-dir"), { recursive: true });
+  await mkdir(path.join(root, "instances", "dead1234"), { recursive: true });
 
   const first = await sweepMetrolStorage(root);
   const second = await sweepMetrolStorage(root);
@@ -219,7 +219,7 @@ test("sweepMetrolStorage tolerates concurrent sweeps (no throws, all stale items
   await writeRegistryEntry(root, staleReg);
   const staleClaim = await claimMetroAlias(root, randomUUID());
   await backdateClaim(root, staleClaim);
-  await mkdir(path.join(root, "instances", "stale-dir"), { recursive: true });
+  await mkdir(path.join(root, "instances", "dead1234"), { recursive: true });
 
   // Race two sweeps; force:true deletes must absorb the ENOENT.
   const [a, b] = await Promise.all([
@@ -232,7 +232,7 @@ test("sweepMetrolStorage tolerates concurrent sweeps (no throws, all stale items
   const allInst = new Set([...a.instances, ...b.instances]);
   assert.deepEqual(allReg, new Set([staleReg.instanceId]));
   assert.deepEqual(allClaims, new Set([staleClaim]));
-  assert.deepEqual(allInst, new Set(["stale-dir"]));
+  assert.deepEqual(allInst, new Set(["dead1234"]));
 });
 
 test("sweepMetrolStorage on an empty rootDir returns an empty result", async (t) => {

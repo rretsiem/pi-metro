@@ -1,110 +1,131 @@
 # pi-metro (Metrol)
 
-Inter-session message bus for the [Pi coding agent](https://github.com/badlogic/pi-mono).
-Live Pi sessions on the same machine discover each other and exchange chat
-messages, fixed queries, and context-aware asks.
+Metrol is a local message bus for [Pi coding agent](https://github.com/badlogic/pi-mono) sessions.
+It lets live sessions on the same machine discover one another, exchange messages,
+ask context-aware questions, and inspect each other's status without a central
+server or daemon.
 
-## Status
+## Why Metrol?
 
-All nine planned enhancements are implemented and integrated: richer live
-status, resilient asks (liveness monitoring, ranked state transitions,
-bounded queue), idle-gated triggered messages, smart peer selection,
-`/metro status`, low-latency fs.watch wake-up, storage hygiene sweeps, and
-`metro_compact`. See
-`thoughts/shared/plans/2026-08-15-metrol-implementation-roadmap.md` (when
-included with the consumer's knowledge base) for the full roadmap and
-progress tracker.
+Pi sessions are normally isolated. Metrol gives them a small, explicit way to
+coordinate work:
+
+- find the sessions working in the same directory, project, or machine;
+- send a message to one peer or broadcast to several peers;
+- ask another session a question and receive its answer in that session's own context;
+- query lightweight session state without using an LLM; and
+- ask a peer to compact its context when needed.
+
+Metrol is designed for local, same-user collaboration between Pi sessions. It
+uses files under `~/.pi/agent/metrol/`; it does not require a network service.
 
 ## Install
 
-Install as a Pi package via `pi install` so it lands in your standard
-package location (`~/.pi/agent/npm/pi-metro` for npm, `~/.pi/agent/git/...`
-for git) and is auto-discovered by every Pi session you run. Any other
-user on this machine gets the same shared install.
+Install it as a Pi package:
 
 ```bash
-# From the public GitHub repo (recommended — versioned, updateable)
+# npm package
+pi install npm:pi-metro
+
+# Git repository
 pi install git:github.com/rretsiem/pi-metro
 
-# Pinned to a specific tag
-pi install git:github.com/rretsiem/pi-metro@v0.2.0
-
-# From a local checkout (developer mode, no copy)
+# Local checkout (developer mode)
 pi install /absolute/path/to/pi-metro
 ```
 
-After install, `/reload` in any Pi session to pick up the new tools and
-commands. Roll out new versions with `pi update --extensions`.
+Reload Pi after installing:
 
-`pi install` adds the package to `~/.pi/agent/settings.json` under
-`packages`; the entry persists across sessions and is shared across all
-Pi processes you run on this machine.
+```text
+/reload
+```
 
-For a one-shot smoke test without touching settings, use `pi -e`:
+Update an installed package with `pi update --extensions`. To try a local
+checkout without changing package settings:
 
 ```bash
 pi -e /absolute/path/to/pi-metro
 ```
 
+## Agent names
+
+Every live Pi session gets a unique Metrol alias such as `Red-1`, `Blue-2`, or
+`Teal-7`. The name is an identity for the running session, not a role or model
+name.
+
+Aliases use one of these color prefixes:
+
+`Red`, `Blue`, `Green`, `Yellow`, `Orange`, `Purple`, `Pink`, `Teal`, `Indigo`,
+`Coral`, `Lime`, `Slate`, `Silver`, or `Bronze`, followed by a number from `1`
+to `99`. Metrol allocates aliases atomically, so two live sessions do not get
+the same name. A session normally reclaims its previous alias when it starts
+again.
+
+Use `metro_whoami` or `/metro status` to see the current session's alias.
+
 ## Commands
 
-- `/metro list [cwd|project|all] [--foreground|--exclude-subagents]` — live sessions (default scope: `project`). The `--foreground` flag hides subagents (sessions spawned via `METROL_PARENT_INSTANCE_ID`); `--exclude-subagents` shows only them. Mutually exclusive.
-- `/metro map` — live sessions grouped by project root, cwd, and line.
-- `/metro inbox` — recent Metrol activity (in/out/requests), newest first.
-- `/metro send [--all] <target> <message>` — chat to one session.
-- `/metro broadcast [--project|--all] <message>` — chat to many (default scope: `cwd`).
-- `/metro query [--all] <target> <status|last_assistant_text>` — non-LLM lookup.
-- `/metro ask [--all] <target> <question>` — the target agent answers with its own context. Resilient: liveness-monitored (90s inactivity / 30min hard ceiling / target-gone detection), bounded incoming queue (max 4, 5th declines immediately with `busy`), replies over 60 KiB are truncated.
-- `/metro status` — self status (state, tool, context usage, active/recent asks) plus all live peers.
-- `/metro compact [--all] <target> [instructions]` — ask a peer to compact its context window; busy/unsupported targets decline immediately (never queued, unlike `/metro ask`).
-- `/metro read [requestId]` — request state/reply (queued | accepted | running | answered | failed).
+Run these inside Pi with the `/metro` command:
 
-Tools for the agent: `metro_list_sessions`, `metro_select_peer`, `metro_whoami`,
-`metro_publish`, `metro_query`, `metro_ask`, `metro_read`, `metro_compact`.
+```text
+/metro list [cwd|project|all] [--foreground|--exclude-subagents]
+/metro map
+/metro inbox
+/metro send [--all] <target> <message>
+/metro broadcast [--project|--all] <message>
+/metro query [--all] <target> <status|last_assistant_text>
+/metro ask [--all] <target> <question>
+/metro read [requestId]
+/metro status
+/metro compact [--all] <target> [instructions]
+```
 
-`metro_select_peer` picks the best live peer for delegation (idle first, then
-lowest context usage), optionally narrowed by a `targetHint` alias/instanceId.
+- `list` finds live peers. The default scope is `project`.
+  `--foreground` keeps only sessions without a parent; `--exclude-subagents`
+  keeps only sessions spawned as subagents.
+- `map` groups all visible sessions by project and working directory.
+- `inbox` shows recent Metrol activity in the current session.
+- `send` sends a chat message to one peer.
+- `broadcast` sends a chat message to every peer in the selected scope.
+- `query` performs a fixed, non-LLM lookup of `status` or
+  `last_assistant_text`.
+- `ask` queues a question for another session. The target answers using its own
+  context; use the returned request ID with `read` to inspect progress or the
+  final reply.
+- `status` shows the current session, visible peers, and recent requests.
+- `compact` asks another session to compact its context. It declines immediately
+  when the target is busy or does not support compaction.
 
-`metro_publish` accepts an optional `triggerTurn: true` to deliver as an
-idle-gated user turn on the receiver instead of a plain chat notification.
-Arrivals are debounced (200 ms) and batched (up to 20 items / 16 KiB); a busy
-receiver retries for up to 60 s before falling back to a queued follow-up
-delivery. Use `metro_ask` instead if you need the reply back.
+The scope values are:
 
-`metro_whoami` returns the calling session's own Metrol identity (alias,
-instanceId, sessionName, model, cwd). Run it before composing any message
-that mentions your own alias — the bus metadata (`Message.from`) is the
-authoritative sender identity for recipients, not anything you type in
-the body.
+- `cwd` — sessions in the same working directory;
+- `project` — sessions in the same Git project (the default); and
+- `all` — every live Metrol session for the current user.
 
-## Subagent convention
+## Agent tools
 
-Set `METROL_PARENT_INSTANCE_ID=<parent-instanceId>` in the environment
-when spawning a subagent. The subagent's registry entry will record the
-parent, and `/metro list --exclude-subagents` will surface it. Foreground
-sessions leave the env var unset.
+The extension also registers these tools for Pi agents:
 
-## Scopes
+- `metro_list_sessions` — list peers;
+- `metro_select_peer` — choose an idle peer, preferring lower context usage;
+- `metro_whoami` — return the current session's Metrol identity;
+- `metro_publish` — send or broadcast a chat message, optionally as an
+  idle-gated trigger turn;
+- `metro_query` — perform a fixed lookup on a peer;
+- `metro_ask` — send a context-aware question;
+- `metro_read` — read a request's current state or reply; and
+- `metro_compact` — request context compaction from a peer.
 
-- `cwd` — same working directory.
-- `project` (default) — same git project root.
-- `all` — every live session on this machine.
+## How it works
 
-## Storage hygiene
+Each Pi session registers itself as a peer and writes messages to the local
+Metrol directory. Sessions maintain a heartbeat and clean up stale registry,
+alias, and inbox data left by crashed sessions. Incoming messages are delivered
+by the receiving Pi session, so `metro_ask` runs in the target's context rather
+than sharing the sender's context.
 
-Every session is a peer janitor: no daemon owns cleanup. At startup, and
-every 5 minutes thereafter, each session sweeps `~/.pi/agent/metrol/` for
-stale registry files, stale alias claims (with a 15s grace period so a
-just-claimed, not-yet-registered session is never swept), and orphaned
-instance/inbox directories left behind by crashed (`kill -9`) sessions —
-not just graceful shutdowns.
-
-## Trust model
-
-**Local, same-user only.** Metrol communicates through files under
-`~/.pi/agent/metrol/` with no authentication or encryption. Any process
-running as your user can read and inject messages. Do not use across trust
-boundaries; ask prompts are executed by the receiving agent's session.
+Metrol is intentionally local and unauthenticated. Any process running as the
+same user can read or inject messages, so do not use it across trust boundaries.
 
 ## Development
 
@@ -113,17 +134,9 @@ npm install
 npm test
 ```
 
-Tests run with `node --test` and `tsx` and are platform-agnostic (no
-filesystem watchers, no network). The CI matrix covers macOS, Linux, and
-Windows.
-
-## Layout
-
-```
-src/        Pi extension source
-test/       node --test suites (one file per module)
-```
+The tests use Node's built-in test runner with `tsx` and do not require a
+network service; watcher coverage uses temporary local directories.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

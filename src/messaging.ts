@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readRegistry, type RegistryEntry } from "./registry.ts";
 import type { Scope } from "./list.ts";
 import {
-  inboxDir,
   resolveTarget,
+  safeInboxDir,
   writeMessage,
   type Message,
   type MessageFrom,
@@ -33,7 +33,7 @@ async function sendChat(
     payload: { text: message },
     timestamp: Date.now(),
   };
-  const r = await writeMessage(await inboxDir(rootDir, toInstanceId), msg);
+  const r = await writeMessage(await safeInboxDir(rootDir, toInstanceId), msg);
   if (!r.ok) throw new Error(`metrol: ${r.error}`);
   return msg.id;
 }

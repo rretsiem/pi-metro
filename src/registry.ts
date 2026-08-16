@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { validateInstanceId, pathInsideRoot } from "./transport.ts";
 
 export const HEARTBEAT_INTERVAL_MS = 10_000;
 export const STALE_THRESHOLD_MS = 30_000;
@@ -34,8 +35,12 @@ function registryDir(rootDir: string) {
   return path.join(rootDir, "registry");
 }
 
-function entryPath(rootDir: string, instanceId: string) {
-  return path.join(registryDir(rootDir), `${instanceId}.json`);
+/** Resolve the registry entry path for a given instanceId, with shape and
+ * root-escape checks. Returns null if the instanceId is malformed or the
+ * resolved path escapes the metrol root. */
+function entryPath(rootDir: string, instanceId: string): string | null {
+  if (!validateInstanceId(instanceId)) return null;
+  return pathInsideRoot(rootDir, "registry", `${instanceId}.json`);
 }
 
 /** ESRCH = dead, EPERM = alive (not ours, but running). */
@@ -48,18 +53,28 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** Atomic write: same-dir temp file + rename. */
+/** Atomic write: same-dir temp file + rename. Throws on a malformed
+ * instanceId or any path that would escape the metrol root. */
 export async function writeRegistryEntry(
   rootDir: string,
   entry: RegistryEntry,
 ): Promise<void> {
+  if (!validateInstanceId(entry.instanceId)) {
+    throw new Error(`metrol: refusing to write registry entry with invalid instanceId: ${entry.instanceId}`);
+  }
   await mkdir(registryDir(rootDir), { recursive: true });
-  const tmp = path.join(registryDir(rootDir), `.tmp-${randomUUID()}.json`);
+  const tmp = pathInsideRoot(rootDir, "registry", `.tmp-${randomUUID()}.json`);
+  if (!tmp) throw new Error("metrol: temp registry path escaped root");
   await writeFile(tmp, JSON.stringify(entry));
-  await rename(tmp, entryPath(rootDir, entry.instanceId));
+  const dest = entryPath(rootDir, entry.instanceId);
+  if (!dest) throw new Error(`metrol: refusing to write registry entry with invalid instanceId: ${entry.instanceId}`);
+  await rename(tmp, dest);
 }
 
-/** Live entries only: fresh heartbeat AND alive PID. */
+/** Live entries only: fresh heartbeat AND alive PID. Entries whose
+ * instanceId doesn't match the bus shape are skipped (defense in depth —
+ * the bus itself validates shapes on write; this catches a pre-existing
+ * hand-edited file). */
 export async function readRegistry(rootDir: string): Promise<RegistryEntry[]> {
   let files: string[];
   try {
@@ -71,10 +86,15 @@ export async function readRegistry(rootDir: string): Promise<RegistryEntry[]> {
   const live: RegistryEntry[] = [];
   for (const file of files) {
     if (!file.endsWith(".json") || file.startsWith(".tmp-")) continue;
+    // The filename is the source of truth for the entry's instanceId — the
+    // file's content also carries it, but we trust the path component.
+    const entryId = file.slice(0, -".json".length);
+    if (!validateInstanceId(entryId)) continue;
     try {
       const entry: RegistryEntry = JSON.parse(
         await readFile(path.join(registryDir(rootDir), file), "utf8"),
       );
+      if (!validateInstanceId(entry.instanceId)) continue;
       if (now - entry.lastHeartbeat > STALE_THRESHOLD_MS) continue;
       if (!pidAlive(entry.pid)) continue;
       live.push(entry);
@@ -85,15 +105,16 @@ export async function readRegistry(rootDir: string): Promise<RegistryEntry[]> {
   return live;
 }
 
-/** Read-modify-write with atomic rename. Throws if the entry does not exist. */
+/** Read-modify-write with atomic rename. Throws if the entry does not exist
+ * or its instanceId is malformed. */
 export async function updateRegistry(
   rootDir: string,
   instanceId: string,
   patch: Partial<RegistryEntry>,
 ): Promise<void> {
-  const existing: RegistryEntry = JSON.parse(
-    await readFile(entryPath(rootDir, instanceId), "utf8"),
-  );
+  const dest = entryPath(rootDir, instanceId);
+  if (!dest) throw new Error(`metrol: refusing to update registry entry with invalid instanceId: ${instanceId}`);
+  const existing: RegistryEntry = JSON.parse(await readFile(dest, "utf8"));
   await writeRegistryEntry(rootDir, { ...existing, ...patch, instanceId });
 }
 
@@ -101,8 +122,10 @@ export async function removeRegistryEntry(
   rootDir: string,
   instanceId: string,
 ): Promise<void> {
+  const dest = entryPath(rootDir, instanceId);
+  if (!dest) return; // malformed: nothing to remove
   try {
-    await rm(entryPath(rootDir, instanceId));
+    await rm(dest);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
@@ -152,26 +175,38 @@ export async function sweepStaleRegistryFiles(
  * behind by crashed or shut-down sessions. Only directories under
  * `instances/` whose name is not in liveInstanceIds are removed; files and
  * claims are never touched. Returns the removed instance IDs.
+ *
+ * SECURITY: uses `lstat` (not `stat`) so symlinks are not followed into
+ * arbitrary filesystem locations. A malicious or buggy local process that
+ * drops a symlink at `instances/<id>` pointing to `/etc` or into a user's
+ * project tree will not be `rm`'d here — the entry is skipped on
+ * `isSymbolicLink()`. The same-user trust model is documented in
+ * SECURITY.md; this is the defense-in-depth boundary for it.
  */
 export async function cleanupStaleInstanceDirs(
   rootDir: string,
   liveInstanceIds: Iterable<string>,
 ): Promise<string[]> {
-  const dir = path.join(rootDir, "instances");
-  let names: string[];
+  const dir = pathInsideRoot(rootDir, "instances");
+  if (!dir) return [];
+  let entries: import("node:fs").Dirent[];
   try {
-    names = await readdir(dir);
+    entries = await readdir(dir, { withFileTypes: true });
   } catch {
     return [];
   }
   const live = new Set(liveInstanceIds);
   const removed: string[] = [];
-  for (const name of names) {
-    if (live.has(name)) continue;
-    const st = await stat(path.join(dir, name)).catch(() => null);
-    if (!st?.isDirectory()) continue;
-    await rm(path.join(dir, name), { recursive: true, force: true });
-    removed.push(name);
+  for (const entry of entries) {
+    // Skip anything that isn't a real directory: symlinks, files, sockets.
+    if (!entry.isDirectory()) continue;
+    if (entry.isSymbolicLink()) continue;
+    if (live.has(entry.name)) continue;
+    if (!validateInstanceId(entry.name)) continue;
+    const target = pathInsideRoot(rootDir, "instances", entry.name);
+    if (!target) continue;
+    await rm(target, { recursive: true, force: true });
+    removed.push(entry.name);
   }
   return removed;
 }

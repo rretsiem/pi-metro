@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeRegistryEntry, type RegistryEntry } from "../src/registry.ts";
-import { inboxDir, type Message } from "../src/transport.ts";
+import {inboxDir, type Message, safeInboxDir} from "../src/transport.ts";
 import {
   COMPACT_TIMEOUT_MS,
   CompactPendingMap,
@@ -60,8 +60,8 @@ function entry(over: Partial<RegistryEntry> & { instanceId: string }): RegistryE
   };
 }
 
-const CALLER = entry({ instanceId: "me", metroName: "Red-1" });
-const TARGET = entry({ instanceId: "bob", metroName: "Blue-1", sessionName: "auth-refactor" });
+const CALLER = entry({ instanceId: "a1a1a1a1", metroName: "Red-1" });
+const TARGET = entry({ instanceId: "b0b0b0b0", metroName: "Blue-1", sessionName: "auth-refactor" });
 
 // ---------------------------------------------------------------------------
 // 1. Receiver declines with `reason: "busy"` when running.
@@ -123,14 +123,14 @@ test("CompactPendingMap: resolves on correlationId match", async () => {
   const waiting = map.register("req-1", 3000);
   const matched = map.resolve({
     version: 1,
-    id: "x",
+    id: "abcdef01",
     type: "compactRes",
     correlationId: "req-1",
-    from: { instanceId: "bob", metroName: "Blue-1" },
-    toInstanceId: "me",
+    from: { instanceId: "b0b0b0b0", metroName: "Blue-1" },
+    toInstanceId: "a1a1a1a1",
     payload: {
       id: "req-1",
-      from: { instanceId: "bob", metroName: "Blue-1" },
+      from: { instanceId: "b0b0b0b0", metroName: "Blue-1" },
       to: "Red-1",
       ok: true,
     } as CompactResponsePayload,
@@ -148,14 +148,14 @@ test("CompactPendingMap: wrong correlationId returns false and does not resolve"
   const waiting = map.register("req-1", 3000);
   const matched = map.resolve({
     version: 1,
-    id: "x",
+    id: "abcdef01",
     type: "compactRes",
     correlationId: "wrong",
-    from: { instanceId: "bob", metroName: "Blue-1" },
-    toInstanceId: "me",
+    from: { instanceId: "b0b0b0b0", metroName: "Blue-1" },
+    toInstanceId: "a1a1a1a1",
     payload: {
-      id: "x",
-      from: { instanceId: "bob", metroName: "Blue-1" },
+      id: "abcdef01",
+      from: { instanceId: "b0b0b0b0", metroName: "Blue-1" },
       to: "Red-1",
       ok: true,
     } as CompactResponsePayload,
@@ -190,7 +190,7 @@ test("CompactPendingMap: timeout when no reply arrives", async () => {
 function makeResponse(replyId: string, ok: boolean, reason?: "busy" | "unsupported"): Message {
   const payload: CompactResponsePayload = {
     id: replyId,
-    from: { instanceId: "bob", metroName: "Blue-1", sessionName: "auth-refactor" },
+    from: { instanceId: "b0b0b0b0", metroName: "Blue-1", sessionName: "auth-refactor" },
     to: "Red-1",
     ok,
     reason,
@@ -201,7 +201,7 @@ function makeResponse(replyId: string, ok: boolean, reason?: "busy" | "unsupport
     type: "compactRes",
     correlationId: replyId,
     from: payload.from,
-    toInstanceId: "me",
+    toInstanceId: "a1a1a1a1",
     payload,
     timestamp: Date.now(),
   } as Message;
@@ -255,7 +255,7 @@ test("requestCompact: self-target rejected before any write", async (t) => {
   assert.equal(persisted[0]?.status, "failed");
   assert.match(persisted[0]?.error ?? "", /cannot target self/);
   // nothing was written to anyone's inbox
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   assert.equal((await readdir(callerInbox)).length, 0);
 });
 
@@ -286,7 +286,7 @@ test("requestCompact: writes a compactReq message with the spec payload shape", 
   await writeRegistryEntry(root, CALLER);
   await writeRegistryEntry(root, TARGET);
   const pending = new CompactPendingMap();
-  const targetInbox = await inboxDir(root, "bob");
+  const targetInbox = await safeInboxDir(root, "b0b0b0b0");
 
   const persisted: { status: string; requestId: string }[] = [];
   const waiting = requestCompact(
@@ -303,7 +303,7 @@ test("requestCompact: writes a compactReq message with the spec payload shape", 
   // the file must be on disk before we reply
   const req = await waitForRequestFile(targetInbox);
   assert.equal(req.type, "compactReq");
-  assert.equal(req.toInstanceId, "bob");
+  assert.equal(req.toInstanceId, "b0b0b0b0");
   assert.equal(req.from.metroName, "Red-1");
   assert.equal(req.from.sessionName, undefined);
   const p = req.payload as CompactRequestPayload;
@@ -327,7 +327,7 @@ test("requestCompact: ok reply → { status: 'ok' }", async (t) => {
   await writeRegistryEntry(root, CALLER);
   await writeRegistryEntry(root, TARGET);
   const pending = new CompactPendingMap();
-  const targetInbox = await inboxDir(root, "bob");
+  const targetInbox = await safeInboxDir(root, "b0b0b0b0");
 
   const waiting = requestCompact(
     root,
@@ -351,7 +351,7 @@ test("requestCompact: busy reply → { status: 'busy' }", async (t) => {
   await writeRegistryEntry(root, CALLER);
   await writeRegistryEntry(root, TARGET);
   const pending = new CompactPendingMap();
-  const targetInbox = await inboxDir(root, "bob");
+  const targetInbox = await safeInboxDir(root, "b0b0b0b0");
 
   const waiting = requestCompact(
     root,
@@ -375,7 +375,7 @@ test("requestCompact: unsupported reply → { status: 'unsupported' }", async (t
   await writeRegistryEntry(root, CALLER);
   await writeRegistryEntry(root, TARGET);
   const pending = new CompactPendingMap();
-  const targetInbox = await inboxDir(root, "bob");
+  const targetInbox = await safeInboxDir(root, "b0b0b0b0");
 
   const waiting = requestCompact(
     root,
@@ -434,16 +434,16 @@ test("requestCompact: timeout → { status: 'failed', error: 'timeout...' }", as
 
 test("respondCompact: busy → writes a reply with reason: 'busy' immediately", async (t) => {
   const root = await withTempRoot(t);
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   const req: Message = {
     version: 1,
     id: "req-1",
     type: "compactReq",
-    from: { instanceId: "me", metroName: "Red-1" },
-    toInstanceId: "bob",
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
+    toInstanceId: "b0b0b0b0",
     payload: {
       id: "req-1",
-      from: { instanceId: "me", metroName: "Red-1" },
+      from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
       to: "Blue-1",
       instructions: "trim",
     } as CompactRequestPayload,
@@ -470,16 +470,16 @@ test("respondCompact: busy → writes a reply with reason: 'busy' immediately", 
 
 test("respondCompact: unsupported → writes a reply with reason: 'unsupported'", async (t) => {
   const root = await withTempRoot(t);
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   const req: Message = {
     version: 1,
     id: "req-2",
     type: "compactReq",
-    from: { instanceId: "me", metroName: "Red-1" },
-    toInstanceId: "bob",
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
+    toInstanceId: "b0b0b0b0",
     payload: {
       id: "req-2",
-      from: { instanceId: "me", metroName: "Red-1" },
+      from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
       to: "Blue-1",
     } as CompactRequestPayload,
     timestamp: Date.now(),
@@ -495,16 +495,16 @@ test("respondCompact: unsupported → writes a reply with reason: 'unsupported'"
 
 test("respondCompact: ok → writes a reply with ok: true and no reason field", async (t) => {
   const root = await withTempRoot(t);
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   const req: Message = {
     version: 1,
     id: "req-3",
     type: "compactReq",
-    from: { instanceId: "me", metroName: "Red-1" },
-    toInstanceId: "bob",
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
+    toInstanceId: "b0b0b0b0",
     payload: {
       id: "req-3",
-      from: { instanceId: "me", metroName: "Red-1" },
+      from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
       to: "Blue-1",
     } as CompactRequestPayload,
     timestamp: Date.now(),

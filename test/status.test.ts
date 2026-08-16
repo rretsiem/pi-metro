@@ -275,13 +275,13 @@ test("11. pending throttled changes merge into the next write", async (t) => {
 //     formatters with blank columns, no "undefined"/"null", no exceptions.
 test("12. old-format entries render with blank columns", async (t) => {
   const root = await withTempRoot(t);
-  await writeRegistryEntry(root, makeEntry({ instanceId: "old-peer" }));
+  await writeRegistryEntry(root, makeEntry({ instanceId: "abcdef0a" }));
   const [s] = await listSessions(
     root,
-    { instanceId: "me", cwd: "/elsewhere", projectRoot: "/elsewhere" },
+    { instanceId: "a1a1a1a1", cwd: "/elsewhere", projectRoot: "/elsewhere" },
     "all",
   );
-  assert.equal(s.instanceId, "old-peer");
+  assert.equal(s.instanceId, "abcdef0a");
   const row = formatSessionRow(s);
   const map = formatMetroMap([s]);
   for (const out of [row, map, JSON.stringify(s)]) {
@@ -299,7 +299,7 @@ test("12. old-format entries render with blank columns", async (t) => {
 test("13. new-format entries with unknown keys are tolerated", async (t) => {
   const root = await withTempRoot(t);
   const entry = makeEntry({
-    instanceId: "new-peer",
+    instanceId: "abcdef0b",
     stateSince: Date.now(),
     activeToolName: "bash",
     contextUsage: { tokens: 1, contextWindow: 2 },
@@ -311,7 +311,7 @@ test("13. new-format entries with unknown keys are tolerated", async (t) => {
   } as RegistryEntry);
   const [s] = await listSessions(
     root,
-    { instanceId: "me", cwd: "/elsewhere", projectRoot: "/elsewhere" },
+    { instanceId: "a1a1a1a1", cwd: "/elsewhere", projectRoot: "/elsewhere" },
     "all",
   );
   assert.equal(s.activeToolName, "bash");

@@ -20,14 +20,14 @@ test("finds project root in dir containing .git", async (t) => {
 test("finds project root when nested under subdirs", async (t) => {
   const root = await withTempRoot(t);
   await mkdir(path.join(root, ".git"));
-  const nested = path.join(root, "a", "b", "c");
+  const nested = path.join(root, "abcdef0d", "b", "c");
   await mkdir(nested, { recursive: true });
   assert.equal(await findProjectRoot(nested), root);
 });
 
 test("falls back to cwd when no .git exists", async (t) => {
   const root = await withTempRoot(t);
-  const nested = path.join(root, "x", "y");
+  const nested = path.join(root, "abcdef01", "abcdef0c");
   await mkdir(nested, { recursive: true });
   assert.equal(await findProjectRoot(nested), nested);
 });

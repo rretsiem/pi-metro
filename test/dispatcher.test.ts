@@ -4,7 +4,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { inboxDir, writeMessage, type Message } from "../src/transport.ts";
+import { safeInboxDir, writeMessage, type Message } from "../src/transport.ts";
 import { InboxDispatcher } from "../src/dispatcher.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -32,8 +32,8 @@ function msg(over: Record<string, unknown> = {}): Message {
     id: randomUUID(),
     type: "chat",
     correlationId: randomUUID(),
-    from: { instanceId: "sender-1", metroName: "Red-1" },
-    toInstanceId: "target-1",
+    from: { instanceId: "12345678", metroName: "Red-1" },
+    toInstanceId: "c0c0c0c0c0c0c0c0",
     payload: { text: "hi" },
     timestamp: Date.now(),
     ...over,
@@ -42,7 +42,7 @@ function msg(over: Record<string, unknown> = {}): Message {
 
 test("delivers each new chat message once and empties the inbox", async (t) => {
   const root = await withTempRoot(t);
-  const dir = await inboxDir(root, "target-1");
+  const dir = await safeInboxDir(root, "c0c0c0c0c0c0c0c0");
   const received: Message[] = [];
   const d = new InboxDispatcher(dir, (m) => {
     received.push(m);
@@ -62,7 +62,7 @@ test("delivers each new chat message once and empties the inbox", async (t) => {
 
 test("a reply registered before the write resolves the waiting promise", async (t) => {
   const root = await withTempRoot(t);
-  const dir = await inboxDir(root, "target-1");
+  const dir = await safeInboxDir(root, "c0c0c0c0c0c0c0c0");
   const d = new InboxDispatcher(dir);
   d.start(10);
   t.after(() => d.stop());
@@ -80,7 +80,7 @@ test("a reply registered before the write resolves the waiting promise", async (
 
 test("two chat files with the same id are delivered once", async (t) => {
   const root = await withTempRoot(t);
-  const dir = await inboxDir(root, "target-1");
+  const dir = await safeInboxDir(root, "c0c0c0c0c0c0c0c0");
   const received: Message[] = [];
   const d = new InboxDispatcher(dir, (m) => {
     received.push(m);
@@ -98,7 +98,7 @@ test("two chat files with the same id are delivered once", async (t) => {
 
 test("stop() waits for an in-flight tick and no ticks run afterwards", async (t) => {
   const root = await withTempRoot(t);
-  const dir = await inboxDir(root, "target-1");
+  const dir = await safeInboxDir(root, "c0c0c0c0c0c0c0c0");
   let entered = 0;
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));

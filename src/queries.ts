@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readRegistry, type RegistryEntry } from "./registry.ts";
 import type { Scope } from "./list.ts";
 import {
-  inboxDir,
+  safeInboxDir,
   resolveTarget,
   writeMessage,
   type Message,
@@ -110,7 +110,7 @@ export async function runQuery(
     timestamp: Date.now(),
   };
   const waiting = dispatcher.awaitReply(msg.id, timeoutMs);
-  const w = await writeMessage(await inboxDir(rootDir, r.target.instanceId), msg);
+  const w = await writeMessage(await safeInboxDir(rootDir, r.target.instanceId), msg);
   if (!w.ok) throw new Error(`metrol: ${w.error}`);
   const reply = await waiting;
   return { id: msg.id, error: reply.error, value: reply.value };
@@ -137,5 +137,5 @@ export async function handleQuery(
       : { kind, error: result.error },
     timestamp: Date.now(),
   };
-  await writeMessage(await inboxDir(rootDir, msg.from.instanceId), reply);
+  await writeMessage(await safeInboxDir(rootDir, msg.from.instanceId), reply);
 }

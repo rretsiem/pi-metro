@@ -4,8 +4,18 @@
   "description": "Inter-session message bus for the Pi coding agent. Live Pi sessions discover each other, exchange chat, fixed queries, and context-aware asks.",
   "type": "module",
   "main": "src/index.ts",
+  "files": [
+    "src/**",
+    "test/**",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md"
+  ],
   "scripts": {
-    "test": "node --test --import tsx test/*.test.ts"
+    "test": "node --test --import tsx test/*.test.ts",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "pi-package",
@@ -15,12 +25,25 @@
     "bus"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {},
   "devDependencies": {
     "tsx": "^4.19.0"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rretsiem/pi-metro.git"
+  },
+  "homepage": "https://github.com/rretsiem/pi-metro",
+  "bugs": {
+    "url": "https://github.com/rretsiem/pi-metro/issues"
   },
   "pi": {
     "extensions": [

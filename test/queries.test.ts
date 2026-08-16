@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeRegistryEntry, type RegistryEntry } from "../src/registry.ts";
-import { inboxDir } from "../src/transport.ts";
+import {inboxDir, safeInboxDir} from "../src/transport.ts";
 import { InboxDispatcher } from "../src/dispatcher.ts";
 import {
   answerQuery,
@@ -33,8 +33,8 @@ function entry(over: Partial<RegistryEntry> & { instanceId: string }): RegistryE
   };
 }
 
-const CALLER = entry({ instanceId: "me", metroName: "Red-1" });
-const TARGET = entry({ instanceId: "bob", metroName: "Blue-1" });
+const CALLER = entry({ instanceId: "a1a1a1a1", metroName: "Red-1" });
+const TARGET = entry({ instanceId: "b0b0b0b0", metroName: "Blue-1" });
 
 function snapshot(over: Partial<QuerySnapshot> = {}): QuerySnapshot {
   return {
@@ -91,7 +91,7 @@ test("last_assistant_text extracts the final assistant text from the active bran
         role: "assistant",
         content: [
           { type: "text", text: "final" },
-          { type: "toolCall", id: "t1", name: "bash" },
+          { type: "toolCall", id: "c1c1c1c1", name: "bash" },
           { type: "text", text: "answer" },
         ],
       },
@@ -125,12 +125,12 @@ test("query request/reply correlation survives an immediate reply", async (t) =>
   await writeRegistryEntry(root, TARGET);
 
   // Caller side: sole reader of the caller inbox.
-  const callerDispatcher = new InboxDispatcher(await inboxDir(root, "me"), () => {});
+  const callerDispatcher = new InboxDispatcher(await safeInboxDir(root, "a1a1a1a1"), () => {});
   callerDispatcher.start(10);
   t.after(() => callerDispatcher.stop());
 
   // Receiver side: sole reader of the target inbox, answers locally and replies fast.
-  const receiver = new InboxDispatcher(await inboxDir(root, "bob"), {
+  const receiver = new InboxDispatcher(await safeInboxDir(root, "b0b0b0b0"), {
     onChat: () => {},
     onQuery: (msg) => handleQuery(root, TARGET, msg, snapshot()),
   });
@@ -153,13 +153,13 @@ test("cross-scope query is rejected unless scope is all", async (t) => {
   await writeRegistryEntry(
     root,
     entry({
-      instanceId: "far",
+      instanceId: "b5b5b5b5",
       metroName: "Pink-1",
       cwd: "/elsewhere/x",
       projectRoot: "/elsewhere",
     }),
   );
-  const dispatcher = new InboxDispatcher(await inboxDir(root, "me"), () => {});
+  const dispatcher = new InboxDispatcher(await safeInboxDir(root, "a1a1a1a1"), () => {});
   dispatcher.start(10);
   t.after(() => dispatcher.stop());
 
@@ -169,12 +169,12 @@ test("cross-scope query is rejected unless scope is all", async (t) => {
   );
 
   // scope all: the query reaches the cross-project target's inbox
-  const receiver = new InboxDispatcher(await inboxDir(root, "far"), {
+  const receiver = new InboxDispatcher(await safeInboxDir(root, "b5b5b5b5"), {
     onChat: () => {},
     onQuery: (msg) =>
       handleQuery(
         root,
-        entry({ instanceId: "far", metroName: "Pink-1", cwd: "/elsewhere/x", projectRoot: "/elsewhere" }),
+        entry({ instanceId: "b5b5b5b5", metroName: "Pink-1", cwd: "/elsewhere/x", projectRoot: "/elsewhere" }),
         msg,
         snapshot({ metroName: "Pink-1" }),
       ),

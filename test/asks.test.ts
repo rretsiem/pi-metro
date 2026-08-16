@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeRegistryEntry, type RegistryEntry } from "../src/registry.ts";
-import { inboxDir, readMessage, type Message } from "../src/transport.ts";
+import { safeInboxDir, readMessage, type Message } from "../src/transport.ts";
 import { InboxDispatcher } from "../src/dispatcher.ts";
 import {
   AskQueue,
@@ -58,8 +58,8 @@ function entry(over: Partial<RegistryEntry> & { instanceId: string }): RegistryE
   };
 }
 
-const CALLER = entry({ instanceId: "me", metroName: "Red-1" });
-const TARGET = entry({ instanceId: "bob", metroName: "Blue-1", sessionName: "auth-refactor" });
+const CALLER = entry({ instanceId: "a1a1a1a1", metroName: "Red-1" });
+const TARGET = entry({ instanceId: "b0b0b0b0", metroName: "Blue-1", sessionName: "auth-refactor" });
 
 function customEntry(data: unknown) {
   return { type: "custom", customType: "metrol:request", data };
@@ -70,7 +70,7 @@ test("formatAskPrompt includes request ID, sender identity, and question", () =>
   const p = formatAskPrompt({
     requestId: "req-123",
     question: "Which module owns token refresh?",
-    from: { instanceId: "me", metroName: "Red-1", sessionName: "auth-refactor" },
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1", sessionName: "auth-refactor" },
   });
   assert.ok(p.includes(askMarker("req-123")));
   assert.ok(p.includes("req-123"));
@@ -79,27 +79,30 @@ test("formatAskPrompt includes request ID, sender identity, and question", () =>
   assert.ok(p.includes("Which module owns token refresh?"));
   assert.match(p, /Metrol/);
   assert.match(p, /not instructions/i);
+  assert.match(p, /do not use metro_publish or metro_ask/i);
+  assert.match(p, /relayed automatically/i);
+  assert.doesNotMatch(p, /The following question was sent/i);
 });
 
 // 2. latest request entry wins when rebuilding state
 test("rebuildRequests: latest entry per requestId wins; findRequest resolves latest/unknown", () => {
   const entries = [
-    customEntry({ requestId: "a", target: "Blue-1", status: "queued", question: "q", updatedAt: 1 }),
+    customEntry({ requestId: "abcdef0d", target: "Blue-1", status: "queued", question: "q", updatedAt: 1 }),
     customEntry({ requestId: "b", target: "Blue-1", status: "queued", question: "q2", updatedAt: 2 }),
     { type: "message", message: { role: "user", content: "noise" } },
-    customEntry({ requestId: "a", target: "Blue-1", status: "answered", question: "q", reply: "the answer", updatedAt: 3 }),
+    customEntry({ requestId: "abcdef0d", target: "Blue-1", status: "answered", question: "q", reply: "the answer", updatedAt: 3 }),
     { type: "custom", customType: "metrol:identity", data: { metroName: "Red-1" } },
   ];
   const all = rebuildRequests(entries);
   assert.equal(all.length, 2);
-  const a = all.find((r) => r.requestId === "a");
+  const a = all.find((r) => r.requestId === "abcdef0d");
   assert.equal(a?.status, "answered");
   assert.equal(a?.reply, "the answer");
 
   // no id → most recent by updatedAt
   const latest = findRequest(entries);
   assert.equal(latest.ok, true);
-  if (latest.ok) assert.equal(latest.request.requestId, "a");
+  if (latest.ok) assert.equal(latest.request.requestId, "abcdef0d");
 
   const older = findRequest(entries, "b");
   assert.equal(older.ok, true);
@@ -118,9 +121,9 @@ test("enqueueAsk persists queued state and writes a valid ask message file", asy
   const root = await withTempRoot(t);
   await writeRegistryEntry(root, CALLER);
   await writeRegistryEntry(root, TARGET);
-  const targetInbox = await inboxDir(root, "bob");
+  const targetInbox = await safeInboxDir(root, "b0b0b0b0");
 
-  const dispatcher = new InboxDispatcher(await inboxDir(root, "me"), () => {});
+  const dispatcher = new InboxDispatcher(await safeInboxDir(root, "a1a1a1a1"), () => {});
   dispatcher.start(10);
   t.after(() => dispatcher.stop());
 
@@ -141,7 +144,7 @@ test("enqueueAsk persists queued state and writes a valid ask message file", asy
   assert.equal(read.ok, true);
   if (read.ok) {
     assert.equal(read.msg.type, "ask");
-    assert.equal(read.msg.toInstanceId, "bob");
+    assert.equal(read.msg.toInstanceId, "b0b0b0b0");
     assert.equal(read.msg.from.metroName, "Red-1");
     const p = read.msg.payload as { requestId: string; question: string };
     assert.equal(p.requestId, r.requestId);
@@ -159,7 +162,7 @@ test("enqueueAsk persists queued state and writes a valid ask message file", asy
 test("enqueueAsk persists failed state and throws when the target cannot be resolved", async (t) => {
   const root = await withTempRoot(t);
   await writeRegistryEntry(root, CALLER);
-  const dispatcher = new InboxDispatcher(await inboxDir(root, "me"), () => {});
+  const dispatcher = new InboxDispatcher(await safeInboxDir(root, "a1a1a1a1"), () => {});
   dispatcher.start(10);
   t.after(() => dispatcher.stop());
 
@@ -179,12 +182,12 @@ test("ask ACK resolves the registered correlation even when it arrives immediate
   await writeRegistryEntry(root, CALLER);
   await writeRegistryEntry(root, TARGET);
 
-  const callerDispatcher = new InboxDispatcher(await inboxDir(root, "me"), () => {});
+  const callerDispatcher = new InboxDispatcher(await safeInboxDir(root, "a1a1a1a1"), () => {});
   callerDispatcher.start(10);
   t.after(() => callerDispatcher.stop());
 
   const acked: string[] = [];
-  const receiver = new InboxDispatcher(await inboxDir(root, "bob"), {
+  const receiver = new InboxDispatcher(await safeInboxDir(root, "b0b0b0b0"), {
     onChat: () => {},
     onAsk: async (msg) => {
       await ackAsk(root, TARGET, msg); // immediate ACK, correlated to msg.id
@@ -261,7 +264,7 @@ test("answered and failed request states are persisted and readable via findRequ
   const entries = [
     customEntry({ requestId: "r1", target: "Blue-1", status: "queued", question: "q", updatedAt: 1 }),
     customEntry({ requestId: "r1", target: "Blue-1", status: "answered", question: "q", reply: "42", updatedAt: 2 }),
-    customEntry({ requestId: "r2", target: "Blue-1", status: "failed", question: "x", error: "agent run aborted", updatedAt: 3 }),
+    customEntry({ requestId: "r2", target: "Blue-1", status: "failed", question: "abcdef01", error: "agent run aborted", updatedAt: 3 }),
   ];
   const r1 = findRequest(entries, "r1");
   assert.equal(r1.ok, true);
@@ -279,13 +282,13 @@ test("answered and failed request states are persisted and readable via findRequ
 
 test("replyAsk writes a reply correlated to the original request", async (t) => {
   const root = await withTempRoot(t);
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   const askMsg: Message = {
     version: 1,
     id: "req-9",
     type: "ask",
-    from: { instanceId: "me", metroName: "Red-1" },
-    toInstanceId: "bob",
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
+    toInstanceId: "b0b0b0b0",
     payload: { requestId: "req-9", question: "q" },
     timestamp: Date.now(),
   };
@@ -319,13 +322,13 @@ test("replyAsk writes a reply correlated to the original request", async (t) => 
 
 test("sendProgress writes a progress ping correlated to the requestId, never resolvable as terminal", async (t) => {
   const root = await withTempRoot(t);
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   const askMsg: Message = {
     version: 1,
     id: "req-p1",
     type: "ask",
-    from: { instanceId: "me", metroName: "Red-1" },
-    toInstanceId: "bob",
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
+    toInstanceId: "b0b0b0b0",
     payload: { requestId: "req-p1", question: "q" },
     timestamp: Date.now(),
   };
@@ -342,13 +345,13 @@ test("sendProgress writes a progress ping correlated to the requestId, never res
 
 test("sendFail writes an immediate terminal decline correlated to the requestId", async (t) => {
   const root = await withTempRoot(t);
-  const callerInbox = await inboxDir(root, "me");
+  const callerInbox = await safeInboxDir(root, "a1a1a1a1");
   const askMsg: Message = {
     version: 1,
     id: "req-f1",
     type: "ask",
-    from: { instanceId: "me", metroName: "Red-1" },
-    toInstanceId: "bob",
+    from: { instanceId: "a1a1a1a1", metroName: "Red-1" },
+    toInstanceId: "b0b0b0b0",
     payload: { requestId: "req-f1", question: "q" },
     timestamp: Date.now(),
   };
@@ -382,7 +385,7 @@ test("extractAskReply captures only the run after the request marker", () => {
         content: [
           { type: "thinking", thinking: "hmm" },
           { type: "text", text: "part one" },
-          { type: "toolCall", id: "t1", name: "bash" },
+          { type: "toolCall", id: "c1c1c1c1", name: "bash" },
           { type: "text", text: "part two" },
         ],
         stopReason: "stop",
@@ -461,7 +464,7 @@ test("extractAskReply: error stopReason returns failed with run_failed, ignoring
 
 test("rebuildRequests: malformed entries (missing requestId or status) are skipped", () => {
   const entries = [
-    customEntry({ requestId: "a", status: "queued", updatedAt: 1 }),
+    customEntry({ requestId: "abcdef0d", status: "queued", updatedAt: 1 }),
     customEntry({ requestId: "b" }),                      // missing status
     customEntry({ status: "queued" }),                    // missing requestId
     customEntry({}),                                      // missing both
@@ -472,18 +475,18 @@ test("rebuildRequests: malformed entries (missing requestId or status) are skipp
   ];
   const all = rebuildRequests(entries);
   assert.equal(all.length, 2);
-  assert.deepEqual(all.map((r) => r.requestId).sort(), ["a", "c"]);
+  assert.deepEqual(all.map((r) => r.requestId).sort(), ["abcdef0d", "c"]);
 });
 
 test("rebuildRequests: equal updatedAt deterministically orders by later index", () => {
   const entries = [
-    customEntry({ requestId: "a", status: "queued", updatedAt: 100 }),
+    customEntry({ requestId: "abcdef0d", status: "queued", updatedAt: 100 }),
     customEntry({ requestId: "b", status: "queued", updatedAt: 100 }),
     customEntry({ requestId: "c", status: "queued", updatedAt: 100 }),
   ];
   const all = rebuildRequests(entries);
   // Same timestamp: later index wins (c, b, a)
-  assert.deepEqual(all.map((r) => r.requestId), ["c", "b", "a"]);
+  assert.deepEqual(all.map((r) => r.requestId), ["c", "b", "abcdef0d"]);
 });
 
 test("truncateReply: text under 60 KiB is unchanged and not flagged", () => {
@@ -495,7 +498,7 @@ test("truncateReply: text under 60 KiB is unchanged and not flagged", () => {
 });
 
 test("truncateReply: text over 60 KiB is truncated and flagged", () => {
-  const text = "x".repeat(70 * 1024);
+  const text = "abcdef01".repeat(70 * 1024);
   const r = truncateReply(text);
   assert.equal(r.truncated, true);
   assert.ok(Buffer.byteLength(r.text, "utf8") <= REPLY_PAYLOAD_MAX_BYTES);
@@ -516,7 +519,7 @@ test("AskQueue.MAX_ASK_QUEUE_DEPTH: enqueue returns true for first 4, false for 
   const q = new AskQueue<string>(async () => {
     // never resolves
   });
-  assert.equal(q.enqueue("a"), true);
+  assert.equal(q.enqueue("abcdef0d"), true);
   assert.equal(q.enqueue("b"), true);
   assert.equal(q.enqueue("c"), true);
   assert.equal(q.enqueue("d"), true);
@@ -529,14 +532,14 @@ test("AskQueue: completing the active run reopens a slot", async () => {
   const q = new AskQueue<string>(
     () => new Promise<void>((r) => { resolveRun = r; }),
   );
-  assert.equal(q.enqueue("a"), true);
+  assert.equal(q.enqueue("abcdef0d"), true);
   assert.equal(q.enqueue("b"), true);
   assert.equal(q.enqueue("c"), true);
   assert.equal(q.enqueue("d"), true);
   assert.equal(q.enqueue("e"), false);
   resolveRun();
   await new Promise((r) => setTimeout(r, 20));
-  // "a" finished, "b" is now active; slot reopened
+  // "abcdef0d" finished, "b" is now active; slot reopened
   assert.equal(q.enqueue("f"), true);
 });
 
@@ -575,7 +578,7 @@ test("applyRankedTransition: incoming terminal wins over non-terminal current", 
 test("livenessMonitor: target_gone when registry removes the target", async () => {
   const entry: RegistryEntry = {
     version: 1,
-    instanceId: "bob",
+    instanceId: "b0b0b0b0",
     metroName: "Bob",
     cwd: "/tmp",
     projectRoot: "/tmp",
@@ -588,7 +591,7 @@ test("livenessMonitor: target_gone when registry removes the target", async () =
   const failures: string[] = [];
   const m = livenessMonitor({
     requestId: "r1",
-    targetInstanceId: "bob",
+    targetInstanceId: "b0b0b0b0",
     rootDir: "/tmp",
     onFailure: (r) => failures.push(r),
     intervalMs: 10,
@@ -606,7 +609,7 @@ test("livenessMonitor: target_gone when registry removes the target", async () =
 test("livenessMonitor: liveness_timeout when heartbeat never advances", async () => {
   const entry: RegistryEntry = {
     version: 1,
-    instanceId: "bob",
+    instanceId: "b0b0b0b0",
     metroName: "Bob",
     cwd: "/tmp",
     projectRoot: "/tmp",
@@ -618,7 +621,7 @@ test("livenessMonitor: liveness_timeout when heartbeat never advances", async ()
   const failures: string[] = [];
   const m = livenessMonitor({
     requestId: "r1",
-    targetInstanceId: "bob",
+    targetInstanceId: "b0b0b0b0",
     rootDir: "/tmp",
     onFailure: (r) => failures.push(r),
     intervalMs: 10,
@@ -634,7 +637,7 @@ test("livenessMonitor: liveness_timeout when heartbeat never advances", async ()
 test("livenessMonitor: deadline_exceeded after hard ceiling", async () => {
   const entry: RegistryEntry = {
     version: 1,
-    instanceId: "bob",
+    instanceId: "b0b0b0b0",
     metroName: "Bob",
     cwd: "/tmp",
     projectRoot: "/tmp",
@@ -646,7 +649,7 @@ test("livenessMonitor: deadline_exceeded after hard ceiling", async () => {
   const failures: string[] = [];
   const m = livenessMonitor({
     requestId: "r1",
-    targetInstanceId: "bob",
+    targetInstanceId: "b0b0b0b0",
     rootDir: "/tmp",
     onFailure: (r) => failures.push(r),
     intervalMs: 10,
@@ -663,7 +666,7 @@ test("livenessMonitor: deadline_exceeded after hard ceiling", async () => {
 test("livenessMonitor: recordEvent resets the inactivity clock", async () => {
   const entry: RegistryEntry = {
     version: 1,
-    instanceId: "bob",
+    instanceId: "b0b0b0b0",
     metroName: "Bob",
     cwd: "/tmp",
     projectRoot: "/tmp",
@@ -675,7 +678,7 @@ test("livenessMonitor: recordEvent resets the inactivity clock", async () => {
   const failures: string[] = [];
   const m = livenessMonitor({
     requestId: "r1",
-    targetInstanceId: "bob",
+    targetInstanceId: "b0b0b0b0",
     rootDir: "/tmp",
     onFailure: (r) => failures.push(r),
     intervalMs: 5,
@@ -696,7 +699,7 @@ test("livenessMonitor: heartbeat advance resets the inactivity clock", async () 
   const failures: string[] = [];
   const m = livenessMonitor({
     requestId: "r1",
-    targetInstanceId: "bob",
+    targetInstanceId: "b0b0b0b0",
     rootDir: "/tmp",
     onFailure: (r) => failures.push(r),
     intervalMs: 5,
@@ -704,7 +707,7 @@ test("livenessMonitor: heartbeat advance resets the inactivity clock", async () 
     readRegistry: async () => [
       {
         version: 1,
-        instanceId: "bob",
+        instanceId: "b0b0b0b0",
         metroName: "Bob",
         cwd: "/tmp",
         projectRoot: "/tmp",
@@ -727,8 +730,8 @@ test("livenessMonitor: heartbeat advance resets the inactivity clock", async () 
 test("enqueueAsk: self-target is rejected before any write", async (t) => {
   const root = await withTempRoot(t);
   await writeRegistryEntry(root, CALLER);
-  const bobInbox = await inboxDir(root, "bob");
-  const meInbox = await inboxDir(root, "me");
+  const bobInbox = await safeInboxDir(root, "b0b0b0b0");
+  const meInbox = await safeInboxDir(root, "a1a1a1a1");
   const dispatcher = new InboxDispatcher(meInbox, () => {});
   dispatcher.start(10);
   t.after(() => dispatcher.stop());
@@ -754,7 +757,7 @@ test("enqueueAsk: self-target is rejected before any write", async (t) => {
 
 test("dispatcher: malformed chat message is rejected and its file removed", async (t) => {
   const root = await withTempRoot(t);
-  const dir = await inboxDir(root, "target-1");
+  const dir = await safeInboxDir(root, "abcdef01");
   const received: Message[] = [];
   const d = new InboxDispatcher(dir, (m) => {
     received.push(m);
@@ -770,8 +773,8 @@ test("dispatcher: malformed chat message is rejected and its file removed", asyn
       version: 2,
       type: "chat",
       id: randomUUID(),
-      from: { instanceId: "sender", metroName: "x" },
-      toInstanceId: "target-1",
+      from: { instanceId: "12345678", metroName: "abcdef01" },
+      toInstanceId: "abcdef01",
       payload: { text: "hi" },
       timestamp: Date.now(),
     }),
