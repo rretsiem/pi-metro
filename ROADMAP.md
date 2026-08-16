@@ -77,7 +77,7 @@ and any new tests must be added in the same commit.
 
 ### Batch C — write-through source of truth (~75 min)
 
-- [ ] **C1. `StatusWriter` write-through** — `src/status.ts` keeps an
+- [x] **C1. `StatusWriter` write-through** — `src/status.ts` keeps an
       in-memory `entry` and only writes via `updateRegistry`. Add an
       in-memory write-through so `toolStart`/`toolEnd`/etc. don't
       read+merge+write the file at all — just patch the in-memory entry

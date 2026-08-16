@@ -845,8 +845,8 @@ export default function metrol(pi: PiLike) {
     const statusWriter = new StatusWriter(rootDir, entry, {
       now: () => Date.now(),
       getContextUsage: () => ctx.getContextUsage(),
-      write: async (dir, id, patch) => {
-        await updateRegistry(dir, id, patch).catch(() => {});
+      writeFull: async (dir, fullEntry) => {
+        await writeRegistryEntry(dir, fullEntry).catch(() => {});
       },
       setLastActivity: (ts) => {
         lastActivity = ts;

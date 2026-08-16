@@ -67,13 +67,13 @@ async function harness(
   const entry = makeEntry();
   await writeRegistryEntry(root, entry);
   let now = opts.startNow ?? Date.now();
-  const writes: Partial<RegistryEntry>[] = [];
+  const writes: RegistryEntry[] = [];
   const writer = new StatusWriter(root, entry, {
     now: () => now,
     getContextUsage: opts.getContextUsage,
-    write: async (rootDir, instanceId, patch) => {
-      writes.push(patch);
-      await updateRegistry(rootDir, instanceId, patch);
+    writeFull: async (rootDir, fullEntry) => {
+      writes.push({ ...fullEntry });
+      await writeRegistryEntry(rootDir, fullEntry);
     },
   });
   return { writer, writes, setNow: (n) => (now = n), entry };
@@ -269,6 +269,36 @@ test("11. pending throttled changes merge into the next write", async (t) => {
   const got = await readEntry(root, entry.instanceId);
   assert.equal(got.sessionName, "renamed"); // throttled field survived
   assert.ok(!("activeToolName" in got)); // latest patch wins
+});
+
+// Write-through: two dispatches racing the same tick both carry the full
+// current entry. The second rename wins, but neither field is lost because
+// both writes were full snapshots, not partial patches. This closes the
+// read-modify-write race the v0.2.0 updateRegistry path had.
+test("11b. concurrent dispatches both carry the full current entry (no field lost)", async (t) => {
+  const start = Date.now();
+  const { writer, writes } = await harness(t, { startNow: start });
+  // Force two dispatches to fire in the same throttle window. agentSettled
+  // is a transition (bypasses throttle), so the only way to get two writes
+  // in the same window is to make agentStart be the second one after a
+  // throttled toolStart — but transitions flush pending first. Instead,
+  // we simulate the race directly: two rapid toolStart/toolEnd pairs whose
+  // patches would otherwise stomp on each other through updateRegistry.
+  await writer.toolStart("bash"); // write 1 (leading edge), patches activeToolName + lastActivity
+  await writer.toolEnd();         // throttled, only patches activeToolName
+  await writer.sessionInfoChanged("renamed"); // throttled, only patches sessionName
+  // Force the throttle to expire and flush the pending fields.
+  await writer.agentStart(); // transition: flushes pending + new fields → write 2
+  assert.equal(writes.length, 2);
+  // Write 2 is the FULL current entry, not a patch. It must contain
+  // everything: activeToolName (cleared by toolEnd), sessionName
+  // ("renamed"), state ("running" from agentStart), and lastActivity.
+  const second = writes[1];
+  assert.equal(second.state, "running");
+  assert.equal(second.sessionName, "renamed");
+  // activeToolName should be undefined (cleared by toolEnd); verify the
+  // absence rather than a strict undefined check.
+  assert.ok(!second.activeToolName);
 });
 
 // 12. Old-format entry (no new keys) passes through toSessionInfo and

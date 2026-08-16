@@ -34,10 +34,18 @@ function normalizeContextUsage(
 export interface StatusWriterOptions {
   now: () => number;
   getContextUsage?: () => unknown;
-  write: (
+  /**
+   * Write the current full entry to disk. The StatusWriter keeps the
+   * in-memory `entry` as the single source of truth (each method patches
+   * it synchronously) and flushes the whole thing on every dispatch —
+   * eliminating the read-modify-write race that the v0.2.0 updateRegistry
+   * path had when two events landed in the same tick (one event's write
+   * could overwrite another's partial patch because both had read the same
+   * baseline).
+   */
+  writeFull: (
     rootDir: string,
-    instanceId: string,
-    patch: Partial<RegistryEntry>,
+    entry: RegistryEntry,
   ) => Promise<void>;
   /** Called after each method that bumps lastActivity so callers can mirror it. */
   setLastActivity?: (ts: number) => void;
@@ -148,17 +156,26 @@ export class StatusWriter {
     isTransition: boolean,
   ): Promise<void> {
     const now = this.opts.now();
-    let toWrite: Partial<RegistryEntry>;
+    let toMerge: Partial<RegistryEntry>;
     if (isTransition) {
-      toWrite = { ...this.pending, ...patch };
+      toMerge = { ...this.pending, ...patch };
       this.pending = {};
     } else {
       this.pending = { ...this.pending, ...patch };
       if (now - this.lastWriteAt < STATUS_WRITE_THROTTLE_MS) return;
-      toWrite = this.pending;
+      toMerge = this.pending;
       this.pending = {};
     }
     this.lastWriteAt = now;
-    await this.opts.write(this.rootDir, this.entry.instanceId, toWrite);
+    // Write the WHOLE current entry, not just the patch. The in-memory
+    // `entry` was patched synchronously by the calling method; this merge
+    // here produces the snapshot we'll hand to the disk. Two concurrent
+    // dispatches (e.g., a heartbeat racing a toolEnd) no longer overwrite
+    // each other's partial patches — both writes carry the full current
+    // entry, and the rename is atomic per file.
+    const merged: RegistryEntry = { ...this.entry, ...toMerge };
+    await this.opts.writeFull(this.rootDir, merged);
+    // Mirror back so subsequent in-memory reads match what the disk has.
+    Object.assign(this.entry, merged);
   }
 }
