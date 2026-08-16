@@ -1,10 +1,27 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.2.1 on `main`, not tagged)
 
-- Added per-file lease coordination: structured `write`/`edit` calls block on
+Pre-publish hardening plus the v0.2.1 roadmap batches. 244 tests.
+
+- Per-file lease coordination: structured `write`/`edit` calls block on
   conflicts, with `metro_claim` and `metro_release` for multi-step edits.
-- Stale leases are renewed while sessions are alive and swept after crashes.
+  Held leases renew with the heartbeat and are swept after a crash.
+- Path-traversal hardening: `validateInstanceId` + `pathInsideRoot` gate every
+  inbox and registry path; stale-instance cleanup skips symlinks.
+- Ask correctness: `replyAsk` truncates long replies, `agent_end` fallback
+  requires `willRetry === false`, incoming asks have a 5-minute hard deadline.
+- Packaging: `files` allowlist, `prepublishOnly: npm test`, `engines.node:
+  ">=20"`, peerDependencies for `@earendil-works/pi-ai`, `@earendil-works/pi-tui`,
+  and `typebox`.
+- `broadcast` writes in parallel (`Promise.all`).
+- Dispatcher dedup history capped at 10k (FIFO evict).
+- Trigger buffer queue capped at 200; overflow drops oldest and logs `metrol:in`.
+- `StatusWriter` write-through: in-memory entry is the source of truth, no
+  read-modify-write race on same-tick updates.
+- `METROL_DISABLE_SWEEP` skips startup and periodic storage sweeps.
+- Inbox poll skip uses an mtime + file-count + total-size fingerprint (NFS/FAT
+  mtime rewind no longer hides new mail).
 
 ## 0.2.0 - 2026-08-16
 

@@ -12,8 +12,10 @@ coordinate work:
 
 - find the sessions working in the same directory, project, or machine;
 - send a message to one peer or broadcast to several peers;
+- inject an idle-gated user turn on a peer (`metro_publish` with `triggerTurn: true`);
 - ask another session a question and receive its answer in that session's own context;
-- query lightweight session state without using an LLM; and
+- query lightweight session state without using an LLM;
+- claim files so two sessions do not overwrite the same path; and
 - ask a peer to compact its context when needed.
 
 Metrol is designed for local, same-user collaboration between Pi sessions. It
@@ -85,13 +87,14 @@ Run these inside Pi with the `/metro` command:
   keeps only sessions spawned as subagents.
 - `map` groups all visible sessions by project and working directory.
 - `inbox` shows recent Metrol activity in the current session.
-- `send` sends a chat message to one peer.
-- `broadcast` sends a chat message to every peer in the selected scope.
+- `send` writes a chat notification to one peer. The target sees a toast and
+  an inbox entry; it does **not** start a model turn.
+- `broadcast` sends the same notification to every peer in the selected scope.
 - `query` performs a fixed, non-LLM lookup of `status` or
   `last_assistant_text`.
 - `ask` queues a question for another session. The target answers using its own
-  context; use the returned request ID with `read` to inspect progress or the
-  final reply.
+  context, then stops; use the returned request ID with `read` to inspect
+  progress or the final reply.
 - `status` shows the current session, visible peers, and recent requests.
 - `compact` asks another session to compact its context. It declines immediately
   when the target is busy or does not support compaction.
@@ -111,8 +114,9 @@ The extension also registers these tools for Pi agents:
 - `metro_whoami` — return the current session's Metrol identity;
 - `metro_claim` — claim file paths before a multi-step edit;
 - `metro_release` — release file claims owned by this session;
-- `metro_publish` — send or broadcast a chat message, optionally as an
-  idle-gated trigger turn;
+- `metro_publish` — send or broadcast a chat notification. Pass
+  `triggerTurn: true` to inject an idle-gated user turn instead (the only
+  way to make the target start working without a human typing);
 - `metro_query` — perform a fixed lookup on a peer;
 - `metro_ask` — send a context-aware question;
 - `metro_read` — read a request's current state or reply; and
@@ -123,15 +127,24 @@ The extension also registers these tools for Pi agents:
 Each Pi session registers itself as a peer and writes messages to the local
 Metrol directory. Sessions maintain a heartbeat and clean up stale registry,
 alias, inbox, and file-lease data left by crashed sessions. Incoming messages
-are delivered
-by the receiving Pi session, so `metro_ask` runs in the target's context rather
-than sharing the sender's context.
+are delivered by the receiving Pi session, so `metro_ask` runs in the target's
+context rather than sharing the sender's context.
+
+Three inbound kinds:
+
+- `chat` (`/metro send`, `metro_publish`) — notification only.
+- `trigger` (`metro_publish` with `triggerTurn: true`) — injected as a user
+  turn when the target is idle (or as a follow-up after ~60s). The prompt
+  treats the text as a peer message, not as instructions.
+- `ask` (`metro_ask`) — injected as a turn; the target answers and stops.
+  The reply is relayed to the sender.
 
 Structured `write` and `edit` calls are automatically protected by per-file
 leases. A conflicting write is blocked and the owning session is notified.
 Use `metro_claim` for a multi-step edit and `metro_release` when finished;
 leases renew while the session is alive and stale leases are swept after a
-crash; cleanup runs every five minutes. Shell commands can bypass this
+crash; cleanup runs every five minutes. Set `METROL_DISABLE_SWEEP=1` to skip
+both the startup and periodic sweeps. Shell commands can bypass this
 protection, so do not use them to evade a lease conflict.
 
 Metrol is intentionally local and unauthenticated. Any process running as the

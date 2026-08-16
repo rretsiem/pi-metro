@@ -3,7 +3,8 @@
 This is the working roadmap for the `pi-metro` extension. It tracks every
 planned change past `v0.2.0`, with priority, scope, test surface, and the
 order we agreed to ship things in. Update this file as work lands — the
-checkboxes are the source of truth.
+checkboxes are the source of truth. `package.json` stays at `0.2.0` until
+the 0.2.1 tag.
 
 Status legend: `[ ]` pending · `[~]` in progress · `[x]` shipped in the listed version.
 
@@ -18,7 +19,10 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` shipped in the listed
 - GitHub repo `github.com/rretsiem/pi-metro` (currently private, pending
   publish to npm + flip to public).
 
-### v0.2.1 (in progress) — pre-publish security + correctness hardening
+### v0.2.1 — landed on `main`, not tagged (2026-08-16)
+
+All of Batch A–D plus leases and the pre-publish security pass. 244 tests.
+Tag + `package.json` bump is the remaining release step.
 
 - [x] **Path-traversal via peer-supplied `instanceId`** — closed. `validateInstanceId`
       gates every `path.join` and registry read at the trust boundary.
@@ -44,71 +48,24 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` shipped in the listed
 
 ---
 
-## Current focus — shipping order
+## Current focus — tag 0.2.1, then v0.2.2
 
-The next work batch ships the S-tier items below in this exact order. Each
-ship should be its own commit, all 198+ existing tests must continue to pass,
-and any new tests must be added in the same commit.
+No open S-tier items. Next code work is the M-tier list below. Tagging
+`v0.2.1` (and bumping `package.json`) is a release step, not a code batch.
 
-### Batch A — quick wins (~30 min total)
+### Shipped in 0.2.1 (kept for history)
 
-- [x] **A1. `broadcast` parallelize** — `Promise.all(recipients.map(sendChat))`
-      in `src/messaging.ts:48-67`. Shipped [commit 7160c90](https://github.com/rretsiem/pi-metro/commit/7160c90),
-      232/232 tests passing. One new regression test added.
-- [x] **A2. `dispatcher.seen` FIFO cap at 10k** — `src/dispatcher.ts:33`.
-      Unbounded `Set<string>` growth → slow `Set.has` after ~1M messages.
-      Cap + FIFO evict when at capacity, drop the oldest entry. No new
-      allocations per evict; just a Map splice.
-      - Test: `test/dispatcher.test.ts` — write 11k unique message IDs,
-        assert `seen.size === 10k` and that the evicted ones are not
-        re-delivered (their files were already deleted, but a re-poll
-        would have re-triggered them).
-
-### Batch B — TriggerBuffer queue cap (~45 min)
-
-- [x] **B1. `TriggerBuffer.queue` cap at 200** — `src/triggers.ts:43`. A
-      malicious peer can queue 1M items during a 60s idle wait, then take
-      hours of sequential 20-item batches to drain. Add a `TRIGGER_QUEUE_CAP`
-      constant, drop the oldest item on overflow, append a `metrol:in`
-      entry per drop so the user can see "trigger queue full, dropped N".
-      - Test: `test/triggers.test.ts` — enqueue 250 items with `isIdle()` stuck
-        `false`; after the buffer caps, assert `pendingCount <= 200` and
-        that the dispatcher's inbox got a `dropped` entry.
-
-### Batch C — write-through source of truth (~75 min)
-
-- [x] **C1. `StatusWriter` write-through** — `src/status.ts` keeps an
-      in-memory `entry` and only writes via `updateRegistry`. Add an
-      in-memory write-through so `toolStart`/`toolEnd`/etc. don't
-      read+merge+write the file at all — just patch the in-memory entry
-      and re-serialize the whole thing. Removes the read-modify-write
-      race window the `reviewer` audit flagged.
-      - Test: `test/status.test.ts` — simulate two updates landing in the
-        same tick (e.g., `toolStart` racing `heartbeat`); assert that the
-        on-disk file contains both fields, not the lossy second-writer-wins
-        race the current `updateRegistry` has.
-
-### Batch D — micro-tweaks (~20 min)
-
-- [x] **D1. `METROL_DISABLE_SWEEP` env var** — `src/sweep.ts` + `src/index.ts`.
-      Useful for test isolation (the periodic 5-min sweep can race tests)
-      and for power users who want to opt out of the auto-cleanup. Read the
-      env var once at `session_start`; if set, skip both the immediate and
-      periodic sweeps.
-      - Test: `test/sweep.test.ts` — verify that setting
-        `METROL_DISABLE_SWEEP=1` in `process.env` causes
-        `sweepMetrolStorage` to be a no-op (or the `index.ts` wiring to not
-        schedule the timer).
-- [x] **D2. `shouldSkipPoll` mtime fingerprint** — `src/watch.ts`. Replace
-      the single `mtimeMs <= lastSeen` check with a combined fingerprint
-      (mtime + file-count + size) so a backward mtime step on weird FSes
-      (NFS, FAT) doesn't skip forever.
-      - Test: `test/watch.test.ts` — manually rewrite a file with an
-        older mtime; assert the watcher still fires on the next poll.
+- [x] **A1. `broadcast` parallelize** — [7160c90](https://github.com/rretsiem/pi-metro/commit/7160c90)
+- [x] **A2. `dispatcher.seen` FIFO cap at 10k** — [c8a9ea0](https://github.com/rretsiem/pi-metro/commit/c8a9ea0)
+- [x] **B1. `TriggerBuffer.queue` cap at 200** — [8c18618](https://github.com/rretsiem/pi-metro/commit/8c18618)
+- [x] **C1. `StatusWriter` write-through** — [f7385be](https://github.com/rretsiem/pi-metro/commit/f7385be)
+- [x] **leases (`metro_claim` / `metro_release`)** — [bb58b75](https://github.com/rretsiem/pi-metro/commit/bb58b75)
+- [x] **D1. `METROL_DISABLE_SWEEP`** — [9b40099](https://github.com/rretsiem/pi-metro/commit/9b40099)
+- [x] **D2. `shouldSkipPoll` fingerprint** — [8309eaf](https://github.com/rretsiem/pi-metro/commit/8309eaf)
 
 ---
 
-## Next batch (v0.2.2) — TBD after v0.2.1 lands
+## Next batch (v0.2.2)
 
 ### Tier M — medium effort (50–150 LoC each)
 
