@@ -23,6 +23,25 @@ coordinate work:
 Metrol is designed for local, same-user collaboration between Pi sessions. It
 uses files under `~/.pi/agent/metrol/`; it does not require a network service.
 
+## Goal
+
+Keep several live Pi sessions on the same machine useful to each other
+without a server, a daemon, or a shared context window.
+
+The bus is local files (`~/.pi/agent/metrol/`). Writes are atomic JSON.
+`fs.watch` wakes the inbox; a short poll is the delivery guarantee.
+Discovery, heartbeats, aliases, and file leases stay on disk for the
+same reason: they outlive a crashed session and need no extra process.
+
+An ask runs in the target's context. A chat is a notification. A
+trigger is an idle-gated turn. Those stay distinct so a peer cannot
+start work by accident.
+
+Intentionally out of scope: other machines, background supervisors,
+network sockets, and encryption. Same-user trust is the model; do not
+use Metrol across a trust boundary. Possible later work lives in
+[ROADMAP.md](ROADMAP.md) and is not a promise.
+
 ## Install
 
 Install it as a Pi package:
