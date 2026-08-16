@@ -108,3 +108,39 @@ test("staleClaimsCleanup never removes a claim whose owner IS in the valid set, 
   const removed = await staleClaimsCleanup(root, new Set([owner]));
   assert.deepEqual(removed, []);
 });
+
+test("a session with no live project sibling always gets run 1", async (t) => {
+  const root = await withTempRoot(t);
+  // Another project already holds Red-1.
+  await claimMetroAlias(root, randomUUID(), undefined, undefined);
+  const name = await claimMetroAlias(root, randomUUID(), undefined, undefined);
+  assert.equal(name, "Blue-1"); // next free color's run 1, never Red-2
+});
+
+test("a live sibling's color is shared, run number increments", async (t) => {
+  const root = await withTempRoot(t);
+  const a = await claimMetroAlias(root, randomUUID(), undefined, undefined);
+  assert.equal(a, "Red-1");
+  const b = await claimMetroAlias(root, randomUUID(), undefined, "Red");
+  assert.equal(b, "Red-2");
+});
+
+test("restart reclaims the previous alias once its stale claim is swept", async (t) => {
+  const root = await withTempRoot(t);
+  const dead = randomUUID();
+  const name = await claimMetroAlias(root, dead, undefined, undefined);
+  assert.equal(name, "Red-1");
+  // Simulate the pre-claim sweep in session_start: dead owner isn't live.
+  await backdateClaim(root, name);
+  await staleClaimsCleanup(root, new Set<string>());
+  const restarted = await claimMetroAlias(root, randomUUID(), name, undefined);
+  assert.equal(restarted, "Red-1");
+});
+
+
+test("a fresh session avoids a color another project holds at a higher run", async (t) => {
+  const root = await withTempRoot(t);
+  await claimMetroAlias(root, randomUUID(), "Red-3", undefined); // legacy neighbor
+  const name = await claimMetroAlias(root, randomUUID(), undefined, undefined);
+  assert.equal(name, "Blue-1");
+});

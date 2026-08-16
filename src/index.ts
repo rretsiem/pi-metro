@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
-import { claimMetroAlias, releaseMetroAlias } from "./identity.ts";
+import { claimMetroAlias, releaseMetroAlias, staleClaimsCleanup } from "./identity.ts";
 import { findProjectRoot } from "./project.ts";
 import {
   readRegistry,
@@ -1147,15 +1147,24 @@ export default function metrol(pi: PiLike) {
       }
     }
 
-    const metroName = await claimMetroAlias(rootDir, instanceId, previousAlias);
+    const projectRoot = await findProjectRoot(ctx.cwd);
+    // Sweep dead neighbors' claims BEFORE claiming: a restarted session must be
+    // able to reclaim its own alias (or run 1) instead of being pushed past the
+    // claim its dead predecessor left behind.
+    const live = await readRegistry(rootDir).catch(() => [] as RegistryEntry[]);
+    if (!isSweepDisabled()) {
+      await staleClaimsCleanup(rootDir, new Set(live.map((e) => e.instanceId))).catch(() => {});
+    }
+    const siblingColor = live
+      .find((e) => e.projectRoot === projectRoot)
+      ?.metroName.split("-")[0];
+    const metroName = await claimMetroAlias(rootDir, instanceId, previousAlias, siblingColor);
 
     const sessionName: string | undefined = ctx.sessionManager.getSessionName();
     if (sessionName === undefined || sessionName === previousAlias) {
       pi.setSessionName(metroName);
     }
     pi.appendEntry("metrol:identity", { metroName, instanceId });
-
-    const projectRoot = await findProjectRoot(ctx.cwd);
     const now = Date.now();
     const parentInstanceId = process.env.METROL_PARENT_INSTANCE_ID || undefined;
     const entry: RegistryEntry = {

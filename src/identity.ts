@@ -57,13 +57,34 @@ export async function claimMetroAlias(
   rootDir: string,
   instanceId: string,
   previousAlias?: string,
+  siblingColor?: string,
 ): Promise<string> {
   await mkdir(claimsDir(rootDir), { recursive: true });
   if (previousAlias && (await tryClaim(rootDir, previousAlias, instanceId))) {
     return previousAlias;
   }
-  for (const line of LINES) {
+  // A live session in the same project: share its color, take the next free run.
+  if (siblingColor && LINES.includes(siblingColor)) {
     for (let run = 1; run <= MAX_RUN; run++) {
+      const name = `${siblingColor}-${run}`;
+      if (await tryClaim(rootDir, name, instanceId)) return name;
+    }
+  }
+  // Alone in this project: prefer a color no one holds at all, so a lone session
+  // is always "<Color>-1" and doesn't share a color with another live project.
+  const used = new Set(
+    (await readdir(claimsDir(rootDir)).catch(() => [])).map((n) => n.split("-")[0]),
+  );
+  for (const line of LINES) {
+    if (used.has(line)) continue;
+    if (await tryClaim(rootDir, `${line}-1`, instanceId)) return `${line}-1`;
+  }
+  for (const line of LINES) {
+    if (await tryClaim(rootDir, `${line}-1`, instanceId)) return `${line}-1`;
+  }
+  // Every color's run 1 is taken: any free slot will do.
+  for (const line of LINES) {
+    for (let run = 2; run <= MAX_RUN; run++) {
       const name = `${line}-${run}`;
       if (await tryClaim(rootDir, name, instanceId)) return name;
     }
