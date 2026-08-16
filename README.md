@@ -1,5 +1,7 @@
 # pi-metro (Metrol)
 
+![pi-metro — Metrol inter-session message bus](https://repository-images.githubusercontent.com/1335506315/bf307e83-aecf-4f31-b67b-0c87a3e63f27)
+
 Metrol is a local message bus for [Pi coding agent](https://github.com/badlogic/pi-mono) sessions.
 It lets live sessions on the same machine discover one another, exchange messages,
 ask context-aware questions, and inspect each other's status without a central
