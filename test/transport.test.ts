@@ -173,15 +173,22 @@ test("validateInstanceId accepts hex and UUID shapes, rejects everything else", 
 });
 
 test("pathInsideRoot accepts nested paths and rejects escapes", () => {
-  const root = "/var/lib/metrol";
-  assert.equal(pathInsideRoot(root, "instances", "abc"), "/var/lib/metrol/instances/abc");
-  assert.equal(pathInsideRoot(root), "/var/lib/metrol");
+  // Use a real temp root + path.join so the test is platform-aware
+  // (Windows separators differ from POSIX). The security guarantee is
+  // independent of the separator; only the resolved absolute path shape
+  // matters.
+  const root = path.join(tmpdir(), "metrol-path-inside-test");
+  const expectInside = path.join(root, "instances", "abc");
+  const expectRoot = root;
+  const expectBar = path.join(root, "bar");
+  assert.equal(pathInsideRoot(root, "instances", "abc"), expectInside);
+  assert.equal(pathInsideRoot(root), expectRoot);
   assert.equal(pathInsideRoot(root, ".."), null);
   assert.equal(pathInsideRoot(root, "..", "etc", "passwd"), null);
   assert.equal(pathInsideRoot(root, "instances", "..", "..", "..", "etc", "passwd"), null);
-  assert.equal(pathInsideRoot(root, "foo", "..", "bar"), "/var/lib/metrol/bar");
+  assert.equal(pathInsideRoot(root, "foo", "..", "bar"), expectBar);
   // dot-component that resolves to the root itself is allowed (matches root)
-  assert.equal(pathInsideRoot(root, ".", "."), "/var/lib/metrol");
+  assert.equal(pathInsideRoot(root, ".", "."), expectRoot);
 });
 
 test("inboxDir returns null for traversal/escape attempts", async (t) => {
