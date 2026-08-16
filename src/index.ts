@@ -16,6 +16,7 @@ import {
 } from "./registry.ts";
 import {
   STORAGE_SWEEP_INTERVAL_MS,
+  isSweepDisabled,
   sweepMetrolStorage,
 } from "./sweep.ts";
 import {
@@ -1332,19 +1333,21 @@ export default function metrol(pi: PiLike) {
     );
     dispatcher.start();
 
-    // Drop stale registry files, alias claims, and instance directories
-    // left behind by crashed/shut-down neighbors. One snapshot of
-    // readRegistry() drives the live-instance-id set for the claim and
-    // instance-dir sweeps; the registry-file sweep uses its own identical
-    // staleness test. See src/sweep.ts for boundary + idempotence.
-    sweepMetrolStorage(rootDir).catch(() => {});
+    if (!isSweepDisabled()) {
+      // Drop stale registry files, alias claims, and instance directories
+      // left behind by crashed/shut-down neighbors. One snapshot of
+      // readRegistry() drives the live-instance-id set for the claim and
+      // instance-dir sweeps; the registry-file sweep uses its own identical
+      // staleness test. See src/sweep.ts for boundary + idempotence.
+      sweepMetrolStorage(rootDir).catch(() => {});
 
-    // Periodic re-sweep so a long-running session doesn't accumulate stale
-    // state from neighbors that died earlier in its lifetime.
-    const storageSweepTimer = setInterval(() => {
-      void sweepMetrolStorage(rootDir);
-    }, STORAGE_SWEEP_INTERVAL_MS);
-    storageSweepTimer.unref();
+      // Periodic re-sweep so a long-running session doesn't accumulate stale
+      // state from neighbors that died earlier in its lifetime.
+      const storageSweepTimer = setInterval(() => {
+        void sweepMetrolStorage(rootDir);
+      }, STORAGE_SWEEP_INTERVAL_MS);
+      storageSweepTimer.unref();
+    }
 
     const heartbeat = setInterval(() => {
       void statusWriter.heartbeat();

@@ -90,7 +90,7 @@ and any new tests must be added in the same commit.
 
 ### Batch D — micro-tweaks (~20 min)
 
-- [ ] **D1. `METROL_DISABLE_SWEEP` env var** — `src/sweep.ts` + `src/index.ts`.
+- [x] **D1. `METROL_DISABLE_SWEEP` env var** — `src/sweep.ts` + `src/index.ts`.
       Useful for test isolation (the periodic 5-min sweep can race tests)
       and for power users who want to opt out of the auto-cleanup. Read the
       env var once at `session_start`; if set, skip both the immediate and

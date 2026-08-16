@@ -19,7 +19,9 @@ import {
 import { claimMetroAlias } from "../src/identity.ts";
 import {
   STORAGE_SWEEP_INTERVAL_MS,
+  isSweepDisabled,
   sweepMetrolStorage,
+  __resetSweepDisabledForTests,
 } from "../src/sweep.ts";
 
 async function withTempRoot(t: import("node:test").TestContext) {
@@ -60,6 +62,73 @@ async function backdateClaim(
 
 test("STORAGE_SWEEP_INTERVAL_MS is 5 minutes", () => {
   assert.equal(STORAGE_SWEEP_INTERVAL_MS, 5 * 60_000);
+});
+
+// --- isSweepDisabled (D1) -------------------------------------------------
+
+test("isSweepDisabled: unset env → false", () => {
+  __resetSweepDisabledForTests();
+  const before = process.env.METROL_DISABLE_SWEEP;
+  delete process.env.METROL_DISABLE_SWEEP;
+  try {
+    __resetSweepDisabledForTests();
+    assert.equal(isSweepDisabled(), false);
+  } finally {
+    if (before !== undefined) process.env.METROL_DISABLE_SWEEP = before;
+    __resetSweepDisabledForTests();
+  }
+});
+
+test("isSweepDisabled: truthy values disable sweep", () => {
+  for (const value of ["1", "true", "TRUE", " yes ", "True"]) {
+    __resetSweepDisabledForTests();
+    const before = process.env.METROL_DISABLE_SWEEP;
+    process.env.METROL_DISABLE_SWEEP = value;
+    try {
+      __resetSweepDisabledForTests();
+      assert.equal(isSweepDisabled(), true, `value=${JSON.stringify(value)}`);
+    } finally {
+      if (before !== undefined) process.env.METROL_DISABLE_SWEEP = before;
+      else delete process.env.METROL_DISABLE_SWEEP;
+      __resetSweepDisabledForTests();
+    }
+  }
+});
+
+test("isSweepDisabled: falsy values do not disable sweep", () => {
+  for (const value of ["0", "false", "no", "", "  "]) {
+    __resetSweepDisabledForTests();
+    const before = process.env.METROL_DISABLE_SWEEP;
+    process.env.METROL_DISABLE_SWEEP = value;
+    try {
+      __resetSweepDisabledForTests();
+      assert.equal(isSweepDisabled(), false, `value=${JSON.stringify(value)}`);
+    } finally {
+      if (before !== undefined) process.env.METROL_DISABLE_SWEEP = before;
+      else delete process.env.METROL_DISABLE_SWEEP;
+      __resetSweepDisabledForTests();
+    }
+  }
+});
+
+test("isSweepDisabled: result is memoized across calls", () => {
+  __resetSweepDisabledForTests();
+  const before = process.env.METROL_DISABLE_SWEEP;
+  process.env.METROL_DISABLE_SWEEP = "1";
+  try {
+    __resetSweepDisabledForTests();
+    assert.equal(isSweepDisabled(), true);
+    // Mutate the env after the first read — the cached decision must hold.
+    process.env.METROL_DISABLE_SWEEP = "0";
+    assert.equal(isSweepDisabled(), true);
+    // Even clearing the env keeps the original answer.
+    delete process.env.METROL_DISABLE_SWEEP;
+    assert.equal(isSweepDisabled(), true);
+  } finally {
+    if (before !== undefined) process.env.METROL_DISABLE_SWEEP = before;
+    else delete process.env.METROL_DISABLE_SWEEP;
+    __resetSweepDisabledForTests();
+  }
 });
 
 test("integration: sweep removes stale registry file, stale claim, and stale instance dir in one call", async (t) => {

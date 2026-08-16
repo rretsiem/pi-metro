@@ -9,6 +9,39 @@ import { sweepExpiredLeases } from "./leases.ts";
 /** How often a running session sweeps stale storage. */
 export const STORAGE_SWEEP_INTERVAL_MS = 5 * 60_000;
 
+/** Env var: when truthy ("1" / "true"), skip both the immediate and the
+ * periodic storage sweeps. Useful for test isolation (the periodic sweep
+ * can race tests) and for power users who want to opt out of the auto
+ * cleanup. Read once and memoized — process.env mutations after the first
+ * call do not flip the cached decision. */
+export const METROL_DISABLE_SWEEP_ENV = "METROL_DISABLE_SWEEP";
+
+let sweepDisabledCache: boolean | undefined;
+
+function truthyEnv(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const v = value.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+/**
+ * Resolve once whether storage sweeps are disabled in this process.
+ * The first call captures `process.env.METROL_DISABLE_SWEEP`; subsequent
+ * calls return the same answer regardless of later mutations, so a session
+ * behaves consistently even if something else touches the env mid-run.
+ */
+export function isSweepDisabled(): boolean {
+  if (sweepDisabledCache !== undefined) return sweepDisabledCache;
+  sweepDisabledCache = truthyEnv(process.env[METROL_DISABLE_SWEEP_ENV]);
+  return sweepDisabledCache;
+}
+
+/** Test-only: forget the memoized env decision so a test can flip the
+ * env var and re-query. Production code never calls this. */
+export function __resetSweepDisabledForTests(): void {
+  sweepDisabledCache = undefined;
+}
+
 export interface SweepResult {
   registry: string[];
   claims: string[];
