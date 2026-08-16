@@ -6,9 +6,14 @@ messages, fixed queries, and context-aware asks.
 
 ## Status
 
-- Stable MVP: identity, transport, dispatcher, registry, queries, asks.
-- In development: richer live status, resilient asks, idle-gated triggered messages.
-- See `thoughts/shared/plans/2026-08-15-metrol-implementation-roadmap.md` (when included with the consumer's knowledge base) for the roadmap.
+All nine planned enhancements are implemented and integrated: richer live
+status, resilient asks (liveness monitoring, ranked state transitions,
+bounded queue), idle-gated triggered messages, smart peer selection,
+`/metro status`, low-latency fs.watch wake-up, storage hygiene sweeps, and
+`metro_compact`. See
+`thoughts/shared/plans/2026-08-15-metrol-implementation-roadmap.md` (when
+included with the consumer's knowledge base) for the full roadmap and
+progress tracker.
 
 ## Install
 
@@ -30,11 +35,22 @@ For automatic discovery, symlink or copy the directory into
 - `/metro send [--all] <target> <message>` — chat to one session.
 - `/metro broadcast [--project|--all] <message>` — chat to many (default scope: `cwd`).
 - `/metro query [--all] <target> <status|last_assistant_text>` — non-LLM lookup.
-- `/metro ask [--all] <target> <question>` — the target agent answers with its own context.
+- `/metro ask [--all] <target> <question>` — the target agent answers with its own context. Resilient: liveness-monitored (90s inactivity / 30min hard ceiling / target-gone detection), bounded incoming queue (max 4, 5th declines immediately with `busy`), replies over 60 KiB are truncated.
+- `/metro status` — self status (state, tool, context usage, active/recent asks) plus all live peers.
+- `/metro compact [--all] <target> [instructions]` — ask a peer to compact its context window; busy/unsupported targets decline immediately (never queued, unlike `/metro ask`).
 - `/metro read [requestId]` — request state/reply (queued | accepted | running | answered | failed).
 
-Tools for the agent: `metro_list_sessions`, `metro_whoami`, `metro_publish`,
-`metro_query`, `metro_ask`, `metro_read`.
+Tools for the agent: `metro_list_sessions`, `metro_select_peer`, `metro_whoami`,
+`metro_publish`, `metro_query`, `metro_ask`, `metro_read`, `metro_compact`.
+
+`metro_select_peer` picks the best live peer for delegation (idle first, then
+lowest context usage), optionally narrowed by a `targetHint` alias/instanceId.
+
+`metro_publish` accepts an optional `triggerTurn: true` to deliver as an
+idle-gated user turn on the receiver instead of a plain chat notification.
+Arrivals are debounced (200 ms) and batched (up to 20 items / 16 KiB); a busy
+receiver retries for up to 60 s before falling back to a queued follow-up
+delivery. Use `metro_ask` instead if you need the reply back.
 
 `metro_whoami` returns the calling session's own Metrol identity (alias,
 instanceId, sessionName, model, cwd). Run it before composing any message
@@ -54,6 +70,15 @@ sessions leave the env var unset.
 - `cwd` — same working directory.
 - `project` (default) — same git project root.
 - `all` — every live session on this machine.
+
+## Storage hygiene
+
+Every session is a peer janitor: no daemon owns cleanup. At startup, and
+every 5 minutes thereafter, each session sweeps `~/.pi/agent/metrol/` for
+stale registry files, stale alias claims (with a 15s grace period so a
+just-claimed, not-yet-registered session is never swept), and orphaned
+instance/inbox directories left behind by crashed (`kill -9`) sessions —
+not just graceful shutdowns.
 
 ## Trust model
 
