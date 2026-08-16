@@ -1,6 +1,6 @@
 {
   "name": "pi-metro",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Inter-session message bus for the Pi coding agent with automatic file-lease coordination. Live Pi sessions discover each other, exchange chat, fixed queries, and context-aware asks.",
   "type": "module",
   "main": "src/index.ts",

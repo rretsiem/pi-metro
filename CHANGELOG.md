@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.2 - 2026-08-17
+
+Identity claim reclaim and color derivation fixes. 266 tests passing.
+
+- Restart reclaims the previous alias: `session_start` now runs
+  `staleClaimsCleanup` before `claimMetroAlias`, so a crashed
+  predecessor's claim no longer bumps the new session to the next free
+  run.
+- Project color is derived from the live registry: a lone session always
+  lands on `<Color>-1`, and run numbers increment only within a color
+  already shared by another live session on the same project.
+- Removed `projects/<hash>.json` sticky-color slot; it was the wrong
+  source of truth and could collide across projects when run counts
+  drifted on a crash.
+
 ## 0.2.1 - 2026-08-16
 
 Pre-publish hardening plus the v0.2.1 roadmap batches. 262 tests, all passing
