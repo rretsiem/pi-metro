@@ -8,6 +8,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { claimMetroAlias, releaseMetroAlias } from "./identity.ts";
 import { findProjectRoot } from "./project.ts";
 import {
+  readRegistry,
   writeRegistryEntry,
   updateRegistry,
   removeRegistryEntry,
@@ -33,6 +34,13 @@ import {
 } from "./presentation.ts";
 import { sendDirect, broadcast } from "./messaging.ts";
 import { safeInboxDir } from "./transport.ts";
+import {
+  claimLease,
+  leaseNameForPath,
+  readLease,
+  releaseLease,
+  renewLease,
+} from "./leases.ts";
 import { InboxDispatcher } from "./dispatcher.ts";
 import {
   QUERY_KINDS,
@@ -127,6 +135,80 @@ export default function metrol(pi: PiLike) {
   }
   let askQueue: AskQueue<IncomingAsk> | undefined;
   let askSettled: (() => void) | null = null;
+
+  type LeaseMode = "manual" | "turn";
+  const ownedLeases = new Map<string, LeaseMode>();
+  const conflictNotices = new Set<string>();
+  const leaseLocks = new Map<string, Promise<void>>();
+  const withLeaseLock = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
+    const previous = leaseLocks.get(name) ?? Promise.resolve();
+    let unlock!: () => void;
+    const gate = new Promise<void>((resolve) => { unlock = resolve; });
+    const queued = previous.then(() => gate);
+    leaseLocks.set(name, queued);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      unlock();
+      if (leaseLocks.get(name) === queued) leaseLocks.delete(name);
+    }
+  };
+  const leaseResource = (cwd: string, rawPath: string) => {
+    const filePath = path.resolve(cwd, rawPath);
+    return { filePath, name: leaseNameForPath(filePath) };
+  };
+  const releaseTurnLeases = async () => {
+    const names = [...ownedLeases]
+      .filter(([, mode]) => mode === "turn")
+      .map(([name]) => name);
+    try {
+      await Promise.all(names.map((name) => withLeaseLock(name, async () => {
+        if (ownedLeases.get(name) !== "turn") return;
+        await releaseLease(rootDir, name, instanceId);
+        ownedLeases.delete(name);
+      })));
+    } finally {
+      conflictNotices.clear();
+    }
+  };
+  const releaseAllLeases = async () => {
+    try {
+      await Promise.all([...ownedLeases.keys()].map((name) => withLeaseLock(name, async () => {
+        await releaseLease(rootDir, name, instanceId);
+        ownedLeases.delete(name);
+      })));
+    } finally {
+      conflictNotices.clear();
+    }
+  };
+  const notifyLeaseConflict = async (
+    name: string,
+    filePath: string,
+    ctx: any,
+  ) => {
+    const owner = await readLease(rootDir, name);
+    if (!owner || owner.instanceId === instanceId) return owner;
+    const key = `${name}:${owner.instanceId}`;
+    const peer = (await readRegistry(rootDir)).find(
+      (entry) => entry.instanceId === owner.instanceId,
+    );
+    if (peer && !conflictNotices.has(key) && selfEntry) {
+      conflictNotices.add(key);
+      void sendDirect(
+        rootDir,
+        selfEntry,
+        peer.instanceId,
+        `Lease conflict: ${filePath} is currently held by ${peer.metroName}; this write was blocked.`,
+        "all",
+      ).catch(() => {});
+    }
+    ctx.ui?.notify?.(
+      `blocked write: ${filePath} is leased by ${peer?.metroName ?? owner.instanceId}`,
+      "warning",
+    );
+    return owner;
+  };
 
   // Outgoing-ask liveness (Task 03): one monitor per non-terminal outgoing
   // ask, started right after enqueueAsk resolves a target. Stopped when a
@@ -568,6 +650,106 @@ export default function metrol(pi: PiLike) {
   });
 
   pi.registerTool({
+    name: "metro_claim",
+    label: "Metro Claim",
+    description:
+      "Claim one or more file paths before a multi-step edit. Claims are atomic; if another Metrol session owns any path, none are acquired. Structured write/edit calls are lease-checked automatically.",
+    parameters: Type.Object({
+      paths: Type.Array(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!selfEntry) {
+        return {
+          content: [{ type: "text", text: "metrol not started yet" }],
+          details: { error: "not_started" },
+        };
+      }
+      const paths = [...new Set(
+        (Array.isArray(params.paths) ? params.paths : []).filter(
+          (p): p is string => typeof p === "string" && p.length > 0,
+        ),
+      )];
+      if (paths.length === 0) {
+        return {
+          content: [{ type: "text", text: "paths must not be empty" }],
+          details: { error: "invalid_paths" },
+        };
+      }
+      const resources = [...new Map(
+        paths.map((raw) => {
+          const resource = leaseResource(ctx.cwd, raw);
+          return [resource.name, resource] as const;
+        }),
+      ).values()];
+      const acquired: string[] = [];
+      const upgraded = new Map<string, LeaseMode>();
+      for (const resource of [...resources].sort((a, b) => a.name.localeCompare(b.name))) {
+        const result = await withLeaseLock(resource.name, async () => {
+          const previousMode = ownedLeases.get(resource.name);
+          if (previousMode) {
+            if (previousMode === "turn") upgraded.set(resource.name, previousMode);
+            ownedLeases.set(resource.name, "manual");
+            return { ok: true, fresh: false };
+          }
+          if (!(await claimLease(rootDir, resource.name, instanceId))) {
+            return { ok: false, fresh: false };
+          }
+          ownedLeases.set(resource.name, "manual");
+          return { ok: true, fresh: true };
+        });
+        if (!result.ok) {
+          await Promise.all(acquired.map((name) => withLeaseLock(name, async () => {
+            await releaseLease(rootDir, name, instanceId).catch(() => {});
+            ownedLeases.delete(name);
+          })));
+          for (const [name, mode] of upgraded) ownedLeases.set(name, mode);
+          const owner = await notifyLeaseConflict(resource.name, resource.filePath, ctx);
+          return {
+            content: [{ type: "text", text: `lease conflict for ${resource.filePath}` }],
+            details: { error: "conflict", path: resource.filePath, owner },
+          };
+        }
+        if (result.fresh) acquired.push(resource.name);
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify({ claimed: resources.map((r) => r.filePath) }) }],
+        details: { claimed: resources.map((r) => r.filePath) },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "metro_release",
+    label: "Metro Release",
+    description: "Release file claims owned by this Metrol session. Omit paths to release all claims.",
+    parameters: Type.Object({
+      paths: Type.Optional(Type.Array(Type.String())),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!selfEntry) {
+        return {
+          content: [{ type: "text", text: "metrol not started yet" }],
+          details: { error: "not_started" },
+        };
+      }
+      const paths = (params.paths as unknown[] | undefined)?.filter(
+        (p): p is string => typeof p === "string" && p.length > 0,
+      ) ?? [];
+      const resources = paths.length
+        ? [...new Set(paths.map((raw) => leaseResource(ctx.cwd, raw).name))]
+        : [...ownedLeases.keys()];
+      await Promise.all(resources.map((name) => withLeaseLock(name, async () => {
+        await releaseLease(rootDir, name, instanceId);
+        ownedLeases.delete(name);
+      })));
+      return {
+        content: [{ type: "text", text: JSON.stringify({ released: resources.length }) }],
+        details: { released: resources.length },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "metro_publish",
     label: "Metro Publish",
     description:
@@ -853,6 +1035,43 @@ export default function metrol(pi: PiLike) {
       },
     });
 
+    // Lease gates structured file mutations before they execute. A turn lease
+    // is automatic; metro_claim upgrades a path to a durable session lease.
+    pi.on("tool_call", async (event, callCtx) => {
+      if (!selfEntry || (event.toolName !== "write" && event.toolName !== "edit")) {
+        return;
+      }
+      const rawPath = event.input?.path;
+      if (typeof rawPath !== "string" || rawPath.length === 0) return;
+      const { filePath, name } = leaseResource(callCtx.cwd, rawPath);
+      return withLeaseLock(name, async () => {
+        if (ownedLeases.has(name)) return;
+        if (await claimLease(rootDir, name, instanceId)) {
+          ownedLeases.set(name, "turn");
+          return;
+        }
+        const owner = await notifyLeaseConflict(name, filePath, callCtx);
+        if (!owner || owner.instanceId === instanceId) {
+          if (await claimLease(rootDir, name, instanceId)) {
+            ownedLeases.set(name, "turn");
+            return;
+          }
+        }
+        return {
+          block: true,
+          reason: `Metrol lease conflict: ${filePath} is owned by ${owner?.instanceId ?? "another session"}`,
+        };
+      });
+    });
+
+    // Keep coordination guidance in code rather than requiring AGENTS.md.
+    const coordinationPrompt =
+      "Metrol coordination: write/edit calls are automatically blocked when another session holds a file lease. Use metro_claim before multi-step edits, and do not bypass a blocked write with bash.";
+    pi.on("before_agent_start", (event) => {
+      if (event.systemPrompt.includes(coordinationPrompt)) return;
+      return { systemPrompt: `${event.systemPrompt}\n\n${coordinationPrompt}` };
+    });
+
     // Incoming ask FIFO: one active ask at a time. The run injects the ask
     // as a user message, waits for that request's run to settle (matched by
     // the marker in the injected prompt), then replies and persists state.
@@ -975,14 +1194,29 @@ export default function metrol(pi: PiLike) {
         const p = msg.payload as { text?: unknown };
         const content = typeof p?.text === "string" ? p.text : "";
         const item: TriggerItem = { from: msg.from, content };
-        triggers.enqueue(item);
-        pi.appendEntry("metrol:in", {
+        const enqueueResult = triggers.enqueue(item);
+        const inboxEntry: Record<string, unknown> = {
           id: msg.id,
           from: msg.from.metroName,
           preview: preview(content),
           timestamp: msg.timestamp,
           triggerTurn: true,
-        });
+        };
+        if (enqueueResult.droppedCount > 0) {
+          // Surface the overflow so the user can see in their inbox log
+          // that peer messages were dropped due to queue saturation. The
+          // dropped sample is capped at 5 items by TriggerBuffer.
+          inboxEntry.queueOverflow = {
+            droppedCount: enqueueResult.droppedCount,
+            droppedFrom: enqueueResult.droppedSamples.map(
+              (it) =>
+                it.from.sessionName
+                  ? `${it.from.metroName} · ${it.from.sessionName}`
+                  : it.from.metroName,
+            ),
+          };
+        }
+        pi.appendEntry("metrol:in", inboxEntry);
       },
       onQuery: async (msg) => {
         if (!selfEntry) return;
@@ -1114,6 +1348,13 @@ export default function metrol(pi: PiLike) {
 
     const heartbeat = setInterval(() => {
       void statusWriter.heartbeat();
+      for (const name of [...ownedLeases.keys()]) {
+        void withLeaseLock(name, async () => {
+          if (!ownedLeases.has(name)) return;
+          const renewed = await renewLease(rootDir, name, instanceId);
+          if (!renewed) ownedLeases.delete(name);
+        }).catch(() => {});
+      }
     }, heartbeatDelayMs());
     heartbeat.unref();
 
@@ -1137,6 +1378,7 @@ export default function metrol(pi: PiLike) {
     // may follow agent_end).
     pi.on("agent_settled", () => {
       void statusWriter.agentSettled();
+      void releaseTurnLeases();
       askSettled?.();
     });
     // Fallback safety net: if a queued/followUp-delivered ask prompt is ever
@@ -1159,9 +1401,10 @@ export default function metrol(pi: PiLike) {
       compactPending.clear();
       for (const monitor of outgoingAskMonitors.values()) monitor.stop();
       outgoingAskMonitors.clear();
-      await dispatcher?.stop();
-      await removeRegistryEntry(rootDir, instanceId);
-      await releaseMetroAlias(rootDir, metroName, instanceId);
+      await dispatcher?.stop().catch(() => {});
+      await releaseAllLeases().catch(() => {});
+      await removeRegistryEntry(rootDir, instanceId).catch(() => {});
+      await releaseMetroAlias(rootDir, metroName, instanceId).catch(() => {});
     });
   });
 }

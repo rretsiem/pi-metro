@@ -109,6 +109,8 @@ The extension also registers these tools for Pi agents:
 - `metro_list_sessions` — list peers;
 - `metro_select_peer` — choose an idle peer, preferring lower context usage;
 - `metro_whoami` — return the current session's Metrol identity;
+- `metro_claim` — claim file paths before a multi-step edit;
+- `metro_release` — release file claims owned by this session;
 - `metro_publish` — send or broadcast a chat message, optionally as an
   idle-gated trigger turn;
 - `metro_query` — perform a fixed lookup on a peer;
@@ -120,9 +122,17 @@ The extension also registers these tools for Pi agents:
 
 Each Pi session registers itself as a peer and writes messages to the local
 Metrol directory. Sessions maintain a heartbeat and clean up stale registry,
-alias, and inbox data left by crashed sessions. Incoming messages are delivered
+alias, inbox, and file-lease data left by crashed sessions. Incoming messages
+are delivered
 by the receiving Pi session, so `metro_ask` runs in the target's context rather
 than sharing the sender's context.
+
+Structured `write` and `edit` calls are automatically protected by per-file
+leases. A conflicting write is blocked and the owning session is notified.
+Use `metro_claim` for a multi-step edit and `metro_release` when finished;
+leases renew while the session is alive and stale leases are swept after a
+crash; cleanup runs every five minutes. Shell commands can bypass this
+protection, so do not use them to evade a lease conflict.
 
 Metrol is intentionally local and unauthenticated. Any process running as the
 same user can read or inject messages, so do not use it across trust boundaries.

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added per-file lease coordination: structured `write`/`edit` calls block on
+  conflicts, with `metro_claim` and `metro_release` for multi-step edits.
+- Stale leases are renewed while sessions are alive and swept after crashes.
+
 ## 0.2.0 - 2026-08-16
 
 Nine roadmap enhancements, fully wired end to end. 191 tests.

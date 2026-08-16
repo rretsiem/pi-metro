@@ -129,7 +129,7 @@ test("integration: sweep removes nothing when everything is live", async (t) => 
   );
 
   const result = await sweepMetrolStorage(root);
-  assert.deepEqual(result, { registry: [], claims: [], instances: [] });
+  assert.deepEqual(result, { registry: [], claims: [], instances: [], leases: [] });
 
   // Everything is still present.
   const regLeft = (await readdir(path.join(root, "registry"))).filter(
@@ -207,7 +207,7 @@ test("sweepMetrolStorage is idempotent when called twice sequentially", async (t
   assert.equal(first.registry.length, 1);
   assert.equal(first.claims.length, 1);
   assert.equal(first.instances.length, 1);
-  assert.deepEqual(second, { registry: [], claims: [], instances: [] });
+  assert.deepEqual(second, { registry: [], claims: [], instances: [], leases: [] });
 });
 
 test("sweepMetrolStorage tolerates concurrent sweeps (no throws, all stale items removed)", async (t) => {
@@ -238,5 +238,145 @@ test("sweepMetrolStorage tolerates concurrent sweeps (no throws, all stale items
 test("sweepMetrolStorage on an empty rootDir returns an empty result", async (t) => {
   const root = await withTempRoot(t);
   const result = await sweepMetrolStorage(root);
-  assert.deepEqual(result, { registry: [], claims: [], instances: [] });
+  assert.deepEqual(result, { registry: [], claims: [], instances: [], leases: [] });
+});
+
+// --- Lease sweep integration ----------------------------------------------
+//
+// These tests write lease fixtures directly to the filesystem (same pattern
+// as the instance-dir tests) so the sweep is exercised end-to-end without
+// depending on the lease acquisition helpers.
+
+async function writeLease(
+  rootDir: string,
+  leaseId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await mkdir(path.join(rootDir, "leases", leaseId), { recursive: true });
+  await writeFile(
+    path.join(rootDir, "leases", leaseId, "owner.json"),
+    JSON.stringify(payload),
+  );
+}
+
+test("integration: sweep removes a stale lease whose owner is not in the live set", async (t) => {
+  const root = await withTempRoot(t);
+  const staleLeaseId = randomUUID();
+  const deadOwner = randomUUID();
+  await writeLease(root, staleLeaseId, {
+    leaseId: staleLeaseId,
+    instanceId: deadOwner,
+    claimedAt: Date.now() - 60_000,
+    expiresAt: Date.now() + 60_000,
+    ttlMs: 120_000,
+  });
+
+  const result = await sweepMetrolStorage(root);
+  assert.deepEqual(result.leases, [staleLeaseId]);
+  // No other invariants disturbed.
+  assert.deepEqual(result.registry, []);
+  assert.deepEqual(result.claims, []);
+  assert.deepEqual(result.instances, []);
+
+  // The stale lease is gone from disk.
+  assert.deepEqual(await readdir(path.join(root, "leases")), []);
+});
+
+test("integration: sweep keeps a lease whose owner is in the live set", async (t) => {
+  const root = await withTempRoot(t);
+  const liveInst = randomUUID();
+  // Live registry entry → owner is in liveIds.
+  await writeRegistryEntry(root, makeEntry({ instanceId: liveInst }));
+
+  const liveLeaseId = randomUUID();
+  await writeLease(root, liveLeaseId, {
+    leaseId: liveLeaseId,
+    instanceId: liveInst,
+    claimedAt: Date.now() - 60_000,
+    expiresAt: Date.now() + 60_000,
+    ttlMs: 120_000,
+  });
+
+  const result = await sweepMetrolStorage(root);
+  assert.deepEqual(result.leases, []);
+
+  const left = (await readdir(path.join(root, "leases"))).filter(
+    (f) => !f.startsWith(".tmp-"),
+  );
+  assert.deepEqual(left, [liveLeaseId]);
+});
+
+test("integration: sweep removes stale leases and live leases in one call, alongside the other sweeps", async (t) => {
+  const root = await withTempRoot(t);
+
+  // Stale registry, stale claim, stale instance dir (mirrors the sibling
+  // integration test — same shape, now with leases mixed in).
+  const staleReg = makeEntry({
+    pid: 99999999,
+    lastHeartbeat: Date.now() - STALE_THRESHOLD_MS - 1000,
+  });
+  await writeRegistryEntry(root, staleReg);
+  const staleClaim = await claimMetroAlias(root, randomUUID());
+  await backdateClaim(root, staleClaim);
+  const staleInst = randomUUID();
+  await mkdir(path.join(root, "instances", staleInst, "inbox"), {
+    recursive: true,
+  });
+  await writeFile(
+    path.join(root, "instances", staleInst, "inbox", "1-a.json"),
+    "{}",
+  );
+
+  // Stale lease: owner not in live set.
+  const staleLeaseId = randomUUID();
+  await writeLease(root, staleLeaseId, {
+    leaseId: staleLeaseId,
+    instanceId: randomUUID(),
+    claimedAt: Date.now() - 60_000,
+    expiresAt: Date.now() + 60_000,
+    ttlMs: 120_000,
+  });
+
+  // Live registry entry keeps the live-side fixtures alive.
+  const liveInst = randomUUID();
+  await writeRegistryEntry(root, makeEntry({ instanceId: liveInst }));
+  const liveLeaseId = randomUUID();
+  await writeLease(root, liveLeaseId, {
+    leaseId: liveLeaseId,
+    instanceId: liveInst,
+    claimedAt: Date.now() - 60_000,
+    expiresAt: Date.now() + 60_000,
+    ttlMs: 120_000,
+  });
+
+  const result = await sweepMetrolStorage(root);
+  assert.deepEqual(result.registry, [staleReg.instanceId]);
+  assert.deepEqual(result.claims, [staleClaim]);
+  assert.deepEqual(result.instances, [staleInst]);
+  assert.deepEqual(result.leases, [staleLeaseId]);
+
+  // Stale lease is gone; live lease is still on disk.
+  const leasesLeft = (await readdir(path.join(root, "leases"))).filter(
+    (f) => !f.startsWith(".tmp-"),
+  );
+  assert.deepEqual(leasesLeft, [liveLeaseId]);
+});
+
+test("sweepMetrolStorage on a rootDir with only a leases directory (no registry) still sweeps leases", async (t) => {
+  // Mirror of the empty-rootDir test, but with a stale lease present.
+  const root = await withTempRoot(t);
+  const staleLeaseId = randomUUID();
+  await writeLease(root, staleLeaseId, {
+    leaseId: staleLeaseId,
+    instanceId: randomUUID(),
+    claimedAt: Date.now() - 60_000,
+    expiresAt: Date.now() + 60_000,
+    ttlMs: 120_000,
+  });
+
+  const result = await sweepMetrolStorage(root);
+  assert.deepEqual(result.registry, []);
+  assert.deepEqual(result.claims, []);
+  assert.deepEqual(result.instances, []);
+  assert.deepEqual(result.leases, [staleLeaseId]);
 });
