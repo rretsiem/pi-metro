@@ -52,7 +52,8 @@ import {
   livenessMonitor,
   rebuildRequests,
   replyAsk,
-  truncateReply,
+  sendFail,
+  sendProgress,
   type AskOutcome,
   type FailReason,
   type LivenessMonitor,
@@ -60,11 +61,9 @@ import {
 } from "./asks.ts";
 import {
   TriggerBuffer,
-  formatTriggerPrompt,
   type TriggerItem,
 } from "./triggers.ts";
 import {
-  COMPACT_TIMEOUT_MS,
   CompactPendingMap,
   decideCompactResponse,
   requestCompact,
@@ -129,6 +128,61 @@ export default function metrol(pi: PiLike) {
   let askQueue: AskQueue<IncomingAsk> | undefined;
   let askSettled: (() => void) | null = null;
 
+  // Outgoing-ask liveness (Task 03): one monitor per non-terminal outgoing
+  // ask, started right after enqueueAsk resolves a target. Stopped when a
+  // terminal reply/fail is persisted, or by its own onFailure firing.
+  const outgoingAskMonitors = new Map<string, LivenessMonitor>();
+  const stopOutgoingAskMonitor = (requestId: string) => {
+    outgoingAskMonitors.get(requestId)?.stop();
+    outgoingAskMonitors.delete(requestId);
+  };
+  const recordOutgoingAskEvent = (requestId: string) => {
+    outgoingAskMonitors.get(requestId)?.recordEvent();
+  };
+  const startOutgoingAskMonitor = (
+    requestId: string,
+    targetInstanceId: string,
+    targetLabel: string,
+  ) => {
+    const monitor = livenessMonitor({
+      requestId,
+      targetInstanceId,
+      rootDir,
+      onFailure: (reason) => {
+        outgoingAskMonitors.delete(requestId);
+        pi.appendEntry("metrol:request", {
+          requestId,
+          target: targetLabel,
+          status: "failed",
+          reason: reason as FailReason,
+          error: `liveness: ${reason}`,
+          updatedAt: Date.now(),
+        });
+      },
+    });
+    outgoingAskMonitors.set(requestId, monitor);
+    monitor.start();
+  };
+  /** Persist ACK-derived "accepted" and arm the liveness monitor. Shared by
+   * the /metro ask command and the metro_ask tool. */
+  const afterAskEnqueued = (
+    r: { requestId: string; ack: string | null; targetInstanceId: string },
+    target: string,
+  ) => {
+    if (!r.ack) {
+      pi.appendEntry("metrol:request", {
+        requestId: r.requestId,
+        target,
+        status: "accepted",
+        updatedAt: Date.now(),
+      });
+    }
+    startOutgoingAskMonitor(r.requestId, r.targetInstanceId, target);
+  };
+
+  // Outgoing-compact liveness: correlation map for metro_compact (Task 09).
+  const compactPending = new CompactPendingMap();
+
   const callerRef = async (cwd: string): Promise<CallerRef> => ({
     instanceId,
     cwd,
@@ -137,7 +191,7 @@ export default function metrol(pi: PiLike) {
 
   pi.registerCommand("metro", {
     description:
-      "Metrol bus: /metro list [cwd|project|all] [--foreground|--exclude-subagents] · map · inbox · send [--all] <target> <msg> · broadcast [--project|--all] <msg> · query [--all] <target> <status|last_assistant_text> · ask [--all] <target> <question> · read [requestId]",
+      "Metrol bus: /metro list [cwd|project|all] [--foreground|--exclude-subagents] · map · inbox · send [--all] <target> <msg> · broadcast [--project|--all] <msg> · query [--all] <target> <status|last_assistant_text> · ask [--all] <target> <question> · status · compact [--all] <target> [instructions] · read [requestId]",
     handler: async (args, ctx) => {
       const parts = (args ?? "").trim().split(/\s+/).filter(Boolean);
       const sub = parts.shift();
@@ -348,6 +402,7 @@ export default function metrol(pi: PiLike) {
             scope,
             (data) => pi.appendEntry("metrol:request", data),
           );
+          afterAskEnqueued(r, target);
           ctx.ui.notify(
             `ask queued \u2192 ${target} \u00b7 ${r.requestId}${r.ack ? ` \u00b7 ack: ${r.ack}` : " \u00b7 acked"}`,
             r.ack ? "warning" : "info",
@@ -369,8 +424,70 @@ export default function metrol(pi: PiLike) {
         ctx.ui.notify(JSON.stringify(r.request, null, 2), "info");
         return;
       }
+      if (sub === "status") {
+        const self: SessionInfo | undefined = selfEntry && {
+          metroName: selfEntry.metroName,
+          sessionName: selfEntry.sessionName,
+          cwd: selfEntry.cwd,
+          projectRoot: selfEntry.projectRoot,
+          pid: selfEntry.pid,
+          model: selfEntry.model,
+          state: selfEntry.state,
+          lastHeartbeat: selfEntry.lastHeartbeat,
+          instanceId: selfEntry.instanceId,
+          stateSince: selfEntry.stateSince,
+          activeToolName: selfEntry.activeToolName,
+          contextUsage: selfEntry.contextUsage,
+          lastActivity: selfEntry.lastActivity,
+        };
+        const caller = await callerRef(ctx.cwd);
+        const peers = await listSessions(rootDir, caller, "all");
+        const recentRequests = rebuildRequests(ctx.sessionManager.getEntries());
+        ctx.ui.notify(formatMetroStatus(self, peers, recentRequests), "info");
+        return;
+      }
+      if (sub === "compact") {
+        if (!selfEntry) {
+          ctx.ui.notify("metrol not started yet", "warning");
+          return;
+        }
+        let scope: Scope = "project";
+        if (parts[0] === "--all") {
+          scope = "all";
+          parts.shift();
+        }
+        const target = parts.shift();
+        const instructions = parts.join(" ") || undefined;
+        if (!target) {
+          ctx.ui.notify("Usage: /metro compact [--all] <target> [instructions]", "warning");
+          return;
+        }
+        try {
+          const outcome = await requestCompact(
+            rootDir,
+            compactPending,
+            selfEntry,
+            target,
+            instructions,
+            scope,
+            (data) => pi.appendEntry("metrol:request", data),
+          );
+          ctx.ui.notify(
+            outcome.status === "ok"
+              ? `compacted \u2192 ${target}`
+              : `compact \u2192 ${target}: ${outcome.status}${outcome.status === "failed" ? ` (${outcome.error})` : ""}`,
+            outcome.status === "ok" ? "info" : "warning",
+          );
+        } catch (err) {
+          ctx.ui.notify(
+            err instanceof Error ? err.message : String(err),
+            "warning",
+          );
+        }
+        return;
+      }
       ctx.ui.notify(
-        "Usage: /metro list [cwd|project|all] | map | inbox | send [--all] <target> <msg> | broadcast [--project|--all] <msg> | query [--all] <target> <status|last_assistant_text> | ask [--all] <target> <question> | read [requestId]",
+        "Usage: /metro list [cwd|project|all] | map | inbox | send [--all] <target> <msg> | broadcast [--project|--all] <msg> | query [--all] <target> <status|last_assistant_text> | ask [--all] <target> <question> | status | compact [--all] <target> [instructions] | read [requestId]",
         "warning",
       );
     },
@@ -592,6 +709,7 @@ export default function metrol(pi: PiLike) {
           params.scope ?? "project",
           (data) => pi.appendEntry("metrol:request", data),
         );
+        afterAskEnqueued(r, params.target);
         return {
           content: [{ type: "text", text: JSON.stringify(r) }],
           details: r,
@@ -623,6 +741,45 @@ export default function metrol(pi: PiLike) {
         content: [{ type: "text", text: JSON.stringify(r.request, null, 2) }],
         details: { request: r.request },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "metro_compact",
+    label: "Metro Compact",
+    description:
+      "Ask another live Metrol session to compact its context window and wait until it finishes (default timeout 3 min). Busy or unsupported targets decline immediately — this never queues like metro_ask does. scope: cwd | project (default) | all.",
+    parameters: Type.Object({
+      target: Type.String(),
+      instructions: Type.Optional(Type.String()),
+      scope: Type.Optional(StringEnum(SCOPES, { default: "project" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (!selfEntry) {
+        return {
+          content: [{ type: "text", text: "metrol not started yet" }],
+          details: { error: "not_started" },
+        };
+      }
+      try {
+        const outcome = await requestCompact(
+          rootDir,
+          compactPending,
+          selfEntry,
+          params.target,
+          params.instructions,
+          params.scope ?? "project",
+          (data) => pi.appendEntry("metrol:request", data),
+        );
+        const isError = outcome.status !== "ok";
+        return {
+          content: [{ type: "text", text: JSON.stringify(outcome) }],
+          details: { outcome, error: isError ? outcome.status : undefined },
+        };
+      } catch (err) {
+        const text = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text }], details: { error: text } };
+      }
     },
   });
 
@@ -712,6 +869,9 @@ export default function metrol(pi: PiLike) {
           ...extra,
         });
       persist("running");
+      // Informational ping so the sender's liveness monitor resets its clock
+      // and can persist "running" — best-effort, never blocks the ask flow.
+      void sendProgress(rootDir, selfEntry, msg, requestId, "started").catch(() => {});
       try {
         const prompt = formatAskPrompt({ requestId, question, from: msg.from });
         if (ctx.isIdle()) {
@@ -748,7 +908,44 @@ export default function metrol(pi: PiLike) {
     askQueue = new AskQueue<IncomingAsk>(runIncomingAsk);
 
     // Single inbox dispatcher: sole reader of this instance's inbox.
-    dispatcher = new InboxDispatcher(await inboxDir(rootDir, instanceId), {
+    const triggers = new TriggerBuffer({
+      isIdle: () => ctx.isIdle(),
+      deliver: (prompt) => {
+        pi.sendUserMessage(prompt);
+        return { kind: "delivered" };
+      },
+      deliverFollowUp: (prompt) => {
+        pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+        return { kind: "deferred" };
+      },
+    });
+
+    /** Rank-based persist for an incoming ACK-substitute/progress/reply/fail
+     * update on an OUTGOING ask. Ignores stale/duplicate/regressive updates
+     * (e.g. a late PROGRESS after REPLY, or a duplicate ACK) via
+     * applyRankedTransition — terminal states are sticky. */
+    const persistRankedAskUpdate = (
+      requestId: string,
+      target: string,
+      incoming: RequestRecord["status"],
+      extra: Partial<RequestRecord> = {},
+    ) => {
+      const existing = findRequest(ctx.sessionManager.getEntries(), requestId);
+      const current = existing.ok ? existing.request.status : "queued";
+      const winner = applyRankedTransition(current, incoming);
+      if (winner !== incoming) return; // current already wins; ignore stale/duplicate
+      pi.appendEntry("metrol:request", {
+        requestId,
+        target,
+        status: winner,
+        updatedAt: Date.now(),
+        ...extra,
+      });
+    };
+
+    dispatcher = new InboxDispatcher(
+      await inboxDir(rootDir, instanceId),
+      {
       onChat: (msg) => {
         const p = msg.payload as { text?: unknown };
         const text = typeof p?.text === "string" ? p.text : JSON.stringify(p);
@@ -761,6 +958,19 @@ export default function metrol(pi: PiLike) {
           from: msg.from.metroName,
           preview: preview(text),
           timestamp: msg.timestamp,
+        });
+      },
+      onTrigger: (msg) => {
+        const p = msg.payload as { text?: unknown };
+        const content = typeof p?.text === "string" ? p.text : "";
+        const item: TriggerItem = { from: msg.from, content };
+        triggers.enqueue(item);
+        pi.appendEntry("metrol:in", {
+          id: msg.id,
+          from: msg.from.metroName,
+          preview: preview(content),
+          timestamp: msg.timestamp,
+          triggerTurn: true,
         });
       },
       onQuery: async (msg) => {
@@ -784,6 +994,19 @@ export default function metrol(pi: PiLike) {
         const p = msg.payload as { requestId?: unknown; question?: unknown };
         const requestId = typeof p?.requestId === "string" ? p.requestId : msg.id;
         const question = typeof p?.question === "string" ? p.question : "";
+        const accepted = askQueue?.enqueue({ msg, requestId, question }) ?? false;
+        if (!accepted) {
+          await sendFail(rootDir, selfEntry, msg, requestId, "busy", "ask queue full (max 4)");
+          pi.appendEntry("metrol:request", {
+            requestId,
+            target: msg.from.metroName,
+            status: "failed",
+            reason: "busy" as FailReason,
+            question,
+            updatedAt: Date.now(),
+          });
+          return;
+        }
         await ackAsk(rootDir, selfEntry, msg);
         pi.appendEntry("metrol:request", {
           requestId,
@@ -792,7 +1015,21 @@ export default function metrol(pi: PiLike) {
           question,
           updatedAt: Date.now(),
         });
-        askQueue?.enqueue({ msg, requestId, question });
+      },
+      onProgress: (msg) => {
+        const p = msg.payload as { requestId?: unknown } | null;
+        if (typeof p?.requestId !== "string") return;
+        recordOutgoingAskEvent(p.requestId);
+        persistRankedAskUpdate(p.requestId, msg.from.metroName, "running");
+      },
+      onFail: (msg) => {
+        const p = msg.payload as { requestId?: unknown; reason?: unknown; error?: unknown } | null;
+        if (typeof p?.requestId !== "string") return;
+        stopOutgoingAskMonitor(p.requestId);
+        persistRankedAskUpdate(p.requestId, msg.from.metroName, "failed", {
+          reason: typeof p.reason === "string" ? (p.reason as FailReason) : undefined,
+          error: typeof p.error === "string" ? p.error : undefined,
+        });
       },
       onReply: (msg) => {
         // Late ask replies land here (ack/final reply were not awaited).
@@ -804,25 +1041,65 @@ export default function metrol(pi: PiLike) {
         };
         if (typeof p?.requestId !== "string") return;
         if (p.status !== "answered" && p.status !== "failed") return;
-        pi.appendEntry("metrol:request", {
-          requestId: p.requestId,
-          target: msg.from.metroName,
-          status: p.status,
+        stopOutgoingAskMonitor(p.requestId);
+        persistRankedAskUpdate(p.requestId, msg.from.metroName, p.status, {
           reply: typeof p.reply === "string" ? p.reply : undefined,
           error: typeof p.error === "string" ? p.error : undefined,
-          updatedAt: Date.now(),
         });
       },
-    });
+      onCompactRequest: async (msg) => {
+        if (!selfEntry) return;
+        const decision = decideCompactResponse({
+          agentRunning: !ctx.isIdle(),
+          hasCompactCapability: typeof ctx.compact === "function",
+        });
+        if (!decision.ok) {
+          await respondCompact(rootDir, selfEntry, msg, decision);
+          return;
+        }
+        const p = msg.payload as CompactRequestPayload | null;
+        const instructions = typeof p?.instructions === "string" ? p.instructions : undefined;
+        const self = selfEntry;
+        try {
+          ctx.compact({
+            customInstructions: instructions,
+            onComplete: () => {
+              void respondCompact(rootDir, self, msg, { ok: true });
+            },
+            onError: () => {
+              // CompactDecision's ok:false branch only models busy/unsupported;
+              // a runtime compaction failure is reported the same way the
+              // caller already handles "unsupported" (retry or ask elsewhere).
+              void respondCompact(rootDir, self, msg, { ok: false, reason: "unsupported" });
+            },
+          });
+        } catch {
+          await respondCompact(rootDir, self, msg, { ok: false, reason: "unsupported" });
+        }
+      },
+      onCompactResponse: (msg) => {
+        // compact.ts owns its own correlation map, independent of this
+        // dispatcher's internal `pending` — always forward here.
+        compactPending.resolve(msg);
+      },
+      },
+      { onWakeUp: () => { void dispatcher?.poll(); } },
+    );
     dispatcher.start();
 
-    // Drop instance dirs left behind by crashed/shut-down sessions. Only
-    // dirs whose instanceId has no live registry entry are removed.
-    readRegistry(rootDir)
-      .then((live) =>
-        cleanupStaleInstanceDirs(rootDir, live.map((e) => e.instanceId)),
-      )
-      .catch(() => {});
+    // Drop stale registry files, alias claims, and instance directories
+    // left behind by crashed/shut-down neighbors. One snapshot of
+    // readRegistry() drives the live-instance-id set for the claim and
+    // instance-dir sweeps; the registry-file sweep uses its own identical
+    // staleness test. See src/sweep.ts for boundary + idempotence.
+    sweepMetrolStorage(rootDir).catch(() => {});
+
+    // Periodic re-sweep so a long-running session doesn't accumulate stale
+    // state from neighbors that died earlier in its lifetime.
+    const storageSweepTimer = setInterval(() => {
+      void sweepMetrolStorage(rootDir);
+    }, STORAGE_SWEEP_INTERVAL_MS);
+    storageSweepTimer.unref();
 
     const heartbeat = setInterval(() => {
       void statusWriter.heartbeat();
@@ -851,9 +1128,24 @@ export default function metrol(pi: PiLike) {
       void statusWriter.agentSettled();
       askSettled?.();
     });
+    // Fallback safety net: if a queued/followUp-delivered ask prompt is ever
+    // silently stranded by the documented Pi platform race (steering/followUp
+    // messages sent mid-run can be dropped), agent_settled for that specific
+    // run may never fire. Re-check on agent_end too, but only when the
+    // runtime has told us no retry/compaction/continuation is pending
+    // (willRetry === false) — checking during a pending retry risks resolving
+    // the ask on a partial/failed attempt right before a successful retry.
+    pi.on("agent_end", (event) => {
+      if (!event?.willRetry) askSettled?.();
+    });
 
     pi.on("session_shutdown", async () => {
       clearInterval(heartbeat);
+      clearInterval(storageSweepTimer);
+      triggers.shutdown();
+      compactPending.clear();
+      for (const monitor of outgoingAskMonitors.values()) monitor.stop();
+      outgoingAskMonitors.clear();
       await dispatcher?.stop();
       await removeRegistryEntry(rootDir, instanceId);
       await releaseMetroAlias(rootDir, metroName, instanceId);

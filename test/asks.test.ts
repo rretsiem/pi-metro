@@ -317,6 +317,57 @@ test("replyAsk writes a reply correlated to the original request", async (t) => 
   });
 });
 
+test("sendProgress writes a progress ping correlated to the requestId, never resolvable as terminal", async (t) => {
+  const root = await withTempRoot(t);
+  const callerInbox = await inboxDir(root, "me");
+  const askMsg: Message = {
+    version: 1,
+    id: "req-p1",
+    type: "ask",
+    from: { instanceId: "me", metroName: "Red-1" },
+    toInstanceId: "bob",
+    payload: { requestId: "req-p1", question: "q" },
+    timestamp: Date.now(),
+  };
+  await sendProgress(root, TARGET, askMsg, "req-p1", "started");
+  const files = (await readdir(callerInbox)).filter((f) => f.endsWith(".json"));
+  assert.equal(files.length, 1);
+  const r = await readMessage(path.join(callerInbox, files[0]));
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.msg.type, "progress");
+  assert.equal(r.msg.correlationId, "req-p1");
+  assert.deepEqual(r.msg.payload, { requestId: "req-p1", status: "running", note: "started" });
+});
+
+test("sendFail writes an immediate terminal decline correlated to the requestId", async (t) => {
+  const root = await withTempRoot(t);
+  const callerInbox = await inboxDir(root, "me");
+  const askMsg: Message = {
+    version: 1,
+    id: "req-f1",
+    type: "ask",
+    from: { instanceId: "me", metroName: "Red-1" },
+    toInstanceId: "bob",
+    payload: { requestId: "req-f1", question: "q" },
+    timestamp: Date.now(),
+  };
+  await sendFail(root, TARGET, askMsg, "req-f1", "busy", "ask queue full");
+  const files = (await readdir(callerInbox)).filter((f) => f.endsWith(".json"));
+  assert.equal(files.length, 1);
+  const r = await readMessage(path.join(callerInbox, files[0]));
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.msg.type, "fail");
+  assert.equal(r.msg.correlationId, "req-f1");
+  assert.deepEqual(r.msg.payload, {
+    requestId: "req-f1",
+    status: "failed",
+    reason: "busy",
+    error: "ask queue full",
+  });
+});
+
 // extractAskReply: marker-anchored capture of the ask's own run
 test("extractAskReply captures only the run after the request marker", () => {
   const marker = askMarker("req-1");

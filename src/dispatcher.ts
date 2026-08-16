@@ -178,16 +178,13 @@ export class InboxDispatcher {
       case "compactReq":
         await this.cb.onCompactRequest?.(msg);
         break;
-      case "compactRes": {
-        const waiter = msg.correlationId && this.pending.get(msg.correlationId);
-        if (waiter) {
-          this.pending.delete(msg.correlationId!);
-          waiter(msg);
-        } else {
-          await this.cb.onCompactResponse?.(msg);
-        }
+      case "compactRes":
+        // compact.ts owns its own correlation map (CompactPendingMap), entirely
+        // separate from this dispatcher's `pending` (which only asks/queries
+        // register into via awaitReply). Always route to the callback, which
+        // resolves the compact-specific map.
+        await this.cb.onCompactResponse?.(msg);
         break;
-      }
     }
   }
 }
