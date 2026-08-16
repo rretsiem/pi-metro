@@ -15,11 +15,12 @@
     "bus"
   ],
   "license": "MIT",
-  "dependencies": {
-    "typebox": "^1.0.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "tsx": "^4.19.0"
+  },
+  "peerDependencies": {
+    "typebox": "*"
   },
   "pi": {
     "extensions": [

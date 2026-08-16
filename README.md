@@ -17,15 +17,34 @@ progress tracker.
 
 ## Install
 
-Place the extension on a path Pi loads, or add it to `pi.extensions` in your
-Pi settings.
+Install as a Pi package via `pi install` so it lands in your standard
+package location (`~/.pi/agent/npm/pi-metro` for npm, `~/.pi/agent/git/...`
+for git) and is auto-discovered by every Pi session you run. Any other
+user on this machine gets the same shared install.
+
+```bash
+# From the public GitHub repo (recommended — versioned, updateable)
+pi install git:github.com/rretsiem/pi-metro
+
+# Pinned to a specific tag
+pi install git:github.com/rretsiem/pi-metro@v0.2.0
+
+# From a local checkout (developer mode, no copy)
+pi install /absolute/path/to/pi-metro
+```
+
+After install, `/reload` in any Pi session to pick up the new tools and
+commands. Roll out new versions with `pi update --extensions`.
+
+`pi install` adds the package to `~/.pi/agent/settings.json` under
+`packages`; the entry persists across sessions and is shared across all
+Pi processes you run on this machine.
+
+For a one-shot smoke test without touching settings, use `pi -e`:
 
 ```bash
 pi -e /absolute/path/to/pi-metro
 ```
-
-For automatic discovery, symlink or copy the directory into
-`~/.pi/agent/extensions/metrol/`.
 
 ## Commands
 
