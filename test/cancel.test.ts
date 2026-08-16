@@ -268,8 +268,10 @@ test("cancel before accept: a queued ask is removed and a fail/cancelled is sent
   // The ask should never have started (it was cancelled before its run).
   assert.equal(startedRuns.includes("req-1"), false);
   // The fail message should be a fail with reason=cancelled.
-  const senderFiles = await readdir(senderDir);
-  assert.ok(senderFiles.length > 0);
+  // Filter out .tmp-* files (atomic rename may leave them briefly visible
+  // on slower filesystems like Linux ext4 under CI load).
+  const senderFiles = (await readdir(senderDir)).filter((f) => !f.startsWith(".tmp-"));
+  assert.ok(senderFiles.length > 0, `expected fail file in ${senderDir}, got ${JSON.stringify(senderFiles)}`);
   const failFile = senderFiles[0];
   const r = await readMessage(path.join(senderDir, failFile));
   assert.equal(r.ok, true);
