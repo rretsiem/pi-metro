@@ -3,8 +3,7 @@
 This is the working roadmap for the `pi-metro` extension. It tracks every
 planned change past `v0.2.0`, with priority, scope, test surface, and the
 order we agreed to ship things in. Update this file as work lands — the
-checkboxes are the source of truth. `package.json` stays at `0.2.0` until
-the 0.2.1 tag.
+checkboxes are the source of truth.
 
 Status legend: `[ ]` pending · `[~]` in progress · `[x]` shipped in the listed version.
 
@@ -18,14 +17,18 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` shipped in the listed
 - 191 tests, 100% passing on macOS/Linux/Windows CI.
 - GitHub repo `github.com/rretsiem/pi-metro` (public).
 
-### v0.2.1 — landed on `main`, not tagged (2026-08-16)
+### v0.2.1 — shipped 2026-08-16 (tag `v0.2.1`, npm `0.2.1`)
 
-All of Batch A–D plus leases and the pre-publish security pass. 244 tests.
-Tag + `package.json` bump is the remaining release step.
+Pre-publish security hardening plus the v0.2.1 roadmap batches (A–E).
+262 tests, all green on macOS / Linux / Windows CI (Node 22). Trusted
+Publishing (OIDC) verified end-to-end; release workflow now runs without
+any static auth token.
 
-- [x] **Path-traversal via peer-supplied `instanceId`** — closed. `validateInstanceId`
+#### Security & correctness hardening
+
+- [x] **Path-traversal via peer-supplied `instanceId`** — `validateInstanceId`
       gates every `path.join` and registry read at the trust boundary.
-      ([commit 3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
+      ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
 - [x] **Defensive `pathInsideRoot()`** — even if a future regex relaxation
       lets a slash-bearing id through, `path.resolve` + prefix check refuses
       it. ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
@@ -33,34 +36,58 @@ Tag + `package.json` bump is the remaining release step.
       + `isSymbolicLink()` so a malicious symlink at `instances/<id> -> /etc`
       is no longer `rm -rf`'d. ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
 - [x] **`replyAsk` truncates long replies** via `truncateReply`. ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
-- [x] **`agent_end` fallback** now requires `event?.willRetry === false`
-      explicitly (was firing on undefined event too). ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
+- [x] **`agent_end` fallback** requires `event?.willRetry === false`
+      explicitly. ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
 - [x] **`runIncomingAsk` 5-minute hard deadline** so a stranded `followUp`
-      can no longer hang the queue slot forever. ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
+      can't hang the queue slot forever. ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
 - [x] **Packaging** — `files` allowlist, `prepublishOnly: npm test`,
       `engines.node: ">=20"`, `repository` / `homepage` / `bugs` fields,
       `@earendil-works/pi-ai` / `@earendil-works/pi-tui` / `typebox` as
       `peerDependencies`. ([6cb86d2](https://github.com/rretsiem/pi-metro/commit/6cb86d2))
-- [x] **Tests** — 198 passing, including 7 new security tests
-      (`validateInstanceId`, `pathInsideRoot`, `inboxDir` null-on-bad-id,
-      `safeInboxDir` throws, symlink-skip, non-dir skip). ([3e3f1f1](https://github.com/rretsiem/pi-metro/commit/3e3f1f1))
 
----
+#### Roadmap batches A–E
 
-## Current focus — tag 0.2.1, then v0.2.2
+- [x] **A1. `broadcast` parallelize** — `Promise.all` per-recipient writes.
+      ([7160c90](https://github.com/rretsiem/pi-metro/commit/7160c90))
+- [x] **A2. `dispatcher.seen` FIFO cap at 10k** — bounds memory growth on
+      long-running sessions. ([c8a9ea0](https://github.com/rretsiem/pi-metro/commit/c8a9ea0))
+- [x] **B1. `TriggerBuffer.queue` cap at 200** — overflow drops oldest and
+      logs `metrol:in`. ([8c18618](https://github.com/rretsiem/pi-metro/commit/8c18618))
+- [x] **C1. `StatusWriter` write-through** — in-memory entry is source of
+      truth, no read-modify-write race. ([f7385be](https://github.com/rretsiem/pi-metro/commit/f7385be))
+- [x] **Per-file lease coordination** — `metro_claim` / `metro_release`,
+      structured `write`/`edit` calls block on conflicts, leases renew with
+      the heartbeat. ([bb58b75](https://github.com/rretsiem/pi-metro/commit/bb58b75))
+- [x] **D1. `METROL_DISABLE_SWEEP` env var** — skips both immediate and
+      periodic storage sweeps. ([9b40099](https://github.com/rretsiem/pi-metro/commit/9b40099))
+- [x] **D2. `shouldSkipPoll` mtime+fileCount+totalSize fingerprint** —
+      NFS/FAT mtime rewinds no longer hide new mail. ([8309eaf](https://github.com/rretsiem/pi-metro/commit/8309eaf))
+- [x] **E1. `metro_delegate` wrapper** — composes `metro_select_peer` +
+      `metro_ask` into one call; honors `targetHint`, auto-picks idle peer
+      with lowest context usage, optionally blocks for the reply. Adds
+      `metrol:handoff` audit entry.
+      ([b952019](https://github.com/rretsiem/pi-metro/commit/b952019))
+- [x] **E2. `metro_cancel`** — best-effort ask cancellation. Queued asks
+      are dropped; running asks are superseded (natural reply discarded).
+      New `cancel` message type; `cancelled` added to `FailReason`.
+      ([12a4564](https://github.com/rretsiem/pi-metro/commit/12a4564))
 
-No open S-tier items. Next code work is the M-tier list below. Tagging
-`v0.2.1` (and bumping `package.json`) is a release step, not a code batch.
+#### Release infrastructure
 
-### Shipped in 0.2.1 (kept for history)
-
-- [x] **A1. `broadcast` parallelize** — [7160c90](https://github.com/rretsiem/pi-metro/commit/7160c90)
-- [x] **A2. `dispatcher.seen` FIFO cap at 10k** — [c8a9ea0](https://github.com/rretsiem/pi-metro/commit/c8a9ea0)
-- [x] **B1. `TriggerBuffer.queue` cap at 200** — [8c18618](https://github.com/rretsiem/pi-metro/commit/8c18618)
-- [x] **C1. `StatusWriter` write-through** — [f7385be](https://github.com/rretsiem/pi-metro/commit/f7385be)
-- [x] **leases (`metro_claim` / `metro_release`)** — [bb58b75](https://github.com/rretsiem/pi-metro/commit/bb58b75)
-- [x] **D1. `METROL_DISABLE_SWEEP`** — [9b40099](https://github.com/rretsiem/pi-metro/commit/9b40099)
-- [x] **D2. `shouldSkipPoll` fingerprint** — [8309eaf](https://github.com/rretsiem/pi-metro/commit/8309eaf)
+- [x] **GitHub Actions CI for `npm test`** — `.github/workflows/test.yml`
+      on Node 22, matrix over macOS / Linux / Windows. Runs on push to
+      `main` and on every PR. ([f9890c4](https://github.com/rretsiem/pi-metro/commit/f9890c4))
+- [x] **Release workflow** — `.github/workflows/release.yml` triggers on
+      `v*` tag push or `workflow_dispatch`. Publishes via npm Trusted
+      Publishing (OIDC); no static token required. Auto-picks
+      `latest` vs `next` dist-tag from the version.
+      ([cd7b586](https://github.com/rretsiem/pi-metro/commit/cd7b586))
+- [x] **GitHub Release page for v0.2.1** — auto-generated notes covering
+      security, packaging, perf batches, and new tools.
+- [x] **npm publish of `pi-metro@0.2.1`** — via the release workflow;
+      Trusted Publishing verified with a `0.2.2-rc.0` dry run.
+- [x] **Repo flipped from private to public** — social preview image
+      hosted on GitHub's image service, no binary in tree.
 
 ---
 
@@ -68,29 +95,6 @@ No open S-tier items. Next code work is the M-tier list below. Tagging
 
 ### Tier M — medium effort (50–150 LoC each)
 
-- [x] **E1. `metro_delegate` wrapper** — `src/delegate.ts`. Composes
-      `metro_select_peer` + `metro_ask` into one call. Honors `targetHint`,
-      auto-picks idle peer with lowest context usage, returns `{requestId,
-      target}` immediately (or blocks for the reply when `waitForReply`).
-      Adds `metrol:handoff` audit entry on the caller side. Useful for the
-      "I'm near context limit, hand this off" workflow.
-      - Test: `test/delegate.test.ts` — 9 cases: no-idle-peer, auto-pick,
-        hint-forces-target, blocking waits for terminal states (answered,
-        failed, timeout), scope=all.
-- [x] **E2. `metro_cancel` (best-effort ask cancellation)** —
-      `src/asks.ts` + `src/dispatcher.ts` + `src/transport.ts` + `src/index.ts`.
-      Adds the `cancel` message type, `AskQueue.remove(predicate)`,
-      receiver-side `onCancel` (drops queued asks; marks running asks
-      cancelled and discards the natural reply), and a sender-side
-      `metro_cancel` tool. Adds `cancelled` to `FailReason`. Best-effort:
-      cannot interrupt the LLM run on the receiver side from the bus
-      (no platform integration); the run continues locally but the sender
-      is told the ask failed with reason=cancelled and any late reply is
-      discarded as superseded.
-      - Test: `test/cancel.test.ts` — 9 cases: AskQueue.remove
-        semantics, dispatcher routes cancel, cancel before accept (queued
-        drop + fail), cancel during run (mid-run supersession + late
-        reply discarded), unknown requestId, malformed payload.
 - [ ] **M1. `metro_log` (audit trail)** — every outbound write + every
       inbound route gets a single-line log entry under `metrol:log` for
       debugging cross-process issues. New `src/log.ts` + small integration
@@ -138,7 +142,7 @@ No open S-tier items. Next code work is the M-tier list below. Tagging
 
 ## How to use this file
 
-1. When starting a new session of work, read the "Current focus" section
+1. When starting a new session of work, read the "Next batch" section
    and pick up the first `[ ]` item.
 2. After shipping a commit, mark the corresponding `[x]` and link the
    commit hash.
