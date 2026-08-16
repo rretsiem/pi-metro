@@ -261,15 +261,16 @@ test("cancel before accept: a queued ask is removed and a fail/cancelled is sent
   };
   await writeMessage(receiverDir, cancel);
 
-  // Wait until the queue drops to 0 and a fail message lands in the
-  // sender's inbox.
+  // Wait until the queue drops to 0 and a finalised fail message (not a
+  // mid-rename .tmp-* intermediate) lands in the sender's inbox.
   await waitFor(() => q.queuedCount === 0);
-  await waitFor(async () => (await readdir(senderDir)).length > 0);
+  await waitFor(
+    async () =>
+      (await readdir(senderDir)).filter((f) => !f.startsWith(".tmp-")).length > 0,
+  );
   // The ask should never have started (it was cancelled before its run).
   assert.equal(startedRuns.includes("req-1"), false);
   // The fail message should be a fail with reason=cancelled.
-  // Filter out .tmp-* files (atomic rename may leave them briefly visible
-  // on slower filesystems like Linux ext4 under CI load).
   const senderFiles = (await readdir(senderDir)).filter((f) => !f.startsWith(".tmp-"));
   assert.ok(senderFiles.length > 0, `expected fail file in ${senderDir}, got ${JSON.stringify(senderFiles)}`);
   const failFile = senderFiles[0];
