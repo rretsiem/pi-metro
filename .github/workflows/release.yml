@@ -8,10 +8,11 @@ on:
 
 jobs:
   publish:
-    name: publish to npm
+    name: publish to npm (Trusted Publishing / OIDC)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write   # required for npm Trusted Publishing (OIDC handshake)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,7 +23,8 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Run tests
         run: npm test
+      # No --token, no .npmrc, no NODE_AUTH_TOKEN. npm reads the OIDC
+      # token from the workflow environment when registry auth is missing
+      # AND the repo is configured as a Trusted Publisher on npmjs.com.
       - name: Publish to npm
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPMJS_PUBLISH_TOKEN }}" > .npmrc
-          npm publish --access public
+        run: npm publish --access public
