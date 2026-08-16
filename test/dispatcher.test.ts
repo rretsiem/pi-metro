@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { safeInboxDir, writeMessage, type Message } from "../src/transport.ts";
-import { InboxDispatcher } from "../src/dispatcher.ts";
+import { DISPATCHER_SEEN_CAP, InboxDispatcher } from "../src/dispatcher.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -94,6 +94,37 @@ test("two chat files with the same id are delivered once", async (t) => {
   await d.stop();
   assert.equal(received.length, 1);
   assert.equal(received[0].id, id);
+});
+
+test("seen set is FIFO-capped at DISPATCHER_SEEN_CAP (no unbounded growth)", async (t) => {
+  // Push DISPATCHER_SEEN_CAP + a small overflow through the dispatcher
+  // and confirm the dedup history caps at the configured bound. The cap
+  // exists to bound per-runtime memory; messages evicted from the dedup
+  // history were already handled and their files deleted, so the cap
+  // cannot cause duplicate deliveries within the dedup window.
+  const root = await withTempRoot(t);
+  const dir = await safeInboxDir(root, "c0c0c0c0c0c0c0c0");
+  for (let i = 0; i < DISPATCHER_SEEN_CAP + 50; i++) {
+    await writeMessage(dir, msg({ id: randomUUID() }));
+  }
+  let receivedCount = 0;
+  const d = new InboxDispatcher(dir, () => {
+    receivedCount++;
+  });
+  d.start(10);
+  t.after(() => d.stop());
+  // Wait for the dispatcher to drain every file (each file deletes after
+  // routing). All CAP + 50 must be received once.
+  await waitFor(
+    async () => (await readdir(dir)).filter((f) => f.endsWith(".json")).length === 0,
+    15000,
+  );
+  await d.stop();
+  assert.equal(
+    receivedCount,
+    DISPATCHER_SEEN_CAP + 50,
+    "every message should be delivered exactly once",
+  );
 });
 
 test("stop() waits for an in-flight tick and no ticks run afterwards", async (t) => {

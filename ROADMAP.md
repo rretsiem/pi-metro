@@ -55,7 +55,7 @@ and any new tests must be added in the same commit.
 - [x] **A1. `broadcast` parallelize** — `Promise.all(recipients.map(sendChat))`
       in `src/messaging.ts:48-67`. Shipped [commit 7160c90](https://github.com/rretsiem/pi-metro/commit/7160c90),
       232/232 tests passing. One new regression test added.
-- [ ] **A2. `dispatcher.seen` FIFO cap at 10k** — `src/dispatcher.ts:33`.
+- [x] **A2. `dispatcher.seen` FIFO cap at 10k** — `src/dispatcher.ts:33`.
       Unbounded `Set<string>` growth → slow `Set.has` after ~1M messages.
       Cap + FIFO evict when at capacity, drop the oldest entry. No new
       allocations per evict; just a Map splice.

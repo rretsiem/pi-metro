@@ -27,6 +27,15 @@ export interface ReplyResult {
 
 export const POLL_INTERVAL_MS = 2_000;
 
+/** Maximum number of message IDs retained in the per-dispatcher dedup set.
+ * Above this size, the oldest IDs are dropped on a FIFO basis. Bounds the
+ * dispatcher's per-runtime memory growth; messages older than the cap are
+ * no longer deduplicated, which is safe because the atomic-read+rename
+ * file delete after routing guarantees we never see the same message twice
+ * inside the cap window — anything evicted was already handled-and-deleted
+ * and the file no longer exists on disk. */
+export const DISPATCHER_SEEN_CAP = 10_000;
+
 /**
  * Sole reader of one instance's inbox. Ticks are serialized (never overlap),
  * message IDs are deduped per runtime, files are deleted only after handling.
@@ -38,7 +47,13 @@ export class InboxDispatcher {
   private current: Promise<void> = Promise.resolve();
   private polling = false;
   private stopped = false;
-  private seen = new Set<string>();
+  /** FIFO-bounded dedup history. `seenIndex` is an O(1) lookup mirror of
+   * `seen`; the array preserves insertion order for FIFO eviction when the
+   * cap is reached. Lookup is O(1) via the Set, eviction is O(1) amortized
+   * (Array.shift + Set.delete), and the cap is `DISPATCHER_SEEN_CAP` so a
+   * long-running session does not accumulate unbounded memory. */
+  private seen: string[] = [];
+  private seenIndex = new Set<string>();
   private pending = new Map<string, (msg: Message) => void>();
   /** Last inbox-dir mtime we did work for. Null = first poll, never skip. */
   private lastSeenDirMtime: number | null = null;
@@ -121,11 +136,18 @@ export class InboxDispatcher {
         if (!file.endsWith(".json") || file.startsWith(".tmp-")) continue;
         const fp = path.join(this.dir, file);
         const r = await readMessage(fp);
-        if (!r.ok || this.seen.has(r.msg.id)) {
+        if (!r.ok || this.seenIndex.has(r.msg.id)) {
           await rm(fp, { force: true }); // malformed or duplicate: never handle
           continue;
         }
-        this.seen.add(r.msg.id);
+        this.seen.push(r.msg.id);
+        this.seenIndex.add(r.msg.id);
+        // FIFO eviction when the cap is reached: drop the oldest entry
+        // from both the array and the Set index. O(1) amortized.
+        if (this.seen.length > DISPATCHER_SEEN_CAP) {
+          const evicted = this.seen.shift()!;
+          this.seenIndex.delete(evicted);
+        }
         try {
           await this.route(r.msg);
         } finally {
