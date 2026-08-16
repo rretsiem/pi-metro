@@ -9,6 +9,7 @@ import {
   TRIGGER_BATCH_MAX_ITEMS,
   TRIGGER_DEBOUNCE_MS,
   TRIGGER_MARKER,
+  TRIGGER_QUEUE_CAP,
   TRIGGER_RETRY_CAP,
   TRIGGER_RETRY_MS,
   TriggerBuffer,
@@ -391,6 +392,62 @@ test("TriggerBuffer: an oversized-first item still ends up in batch 1 (not batch
   assert.equal(b2Bullets, 2);
   assert.match(r.calls[1].prompt, /Blue-2/);
   assert.match(r.calls[1].prompt, /Blue-3/);
+});
+
+test("TriggerBuffer: queue is FIFO-capped at TRIGGER_QUEUE_CAP and overflow is reported", async () => {
+  // With the receiver stuck "busy", enqueue TRIGGER_QUEUE_CAP + 50 items
+  // and assert: (1) the queue never exceeds the cap, (2) every enqueue
+  // call after the cap returns a droppedCount, (3) the droppedSamples
+  // list names the items that were evicted.
+  const r = makeRecorder();
+  const b = new TriggerBuffer({
+    isIdle: () => false, // never idle; queue stays full while we enqueue
+    deliver: r.deliver,
+    deliverFollowUp: r.deliverFollowUp,
+  });
+  // Drain is in flight for every enqueue. Use a stub sleep to avoid
+  // hanging the test on the 500ms busy-retry interval; the drain promise
+  // resolves only when the buffer is empty, which never happens here.
+  b.shutdown(); // make absolutely sure no prior state
+  const total = TRIGGER_QUEUE_CAP + 50;
+  const results = [];
+  for (let i = 0; i < total; i++) {
+    results.push(b.enqueue(item(`Blue-${i}`, `msg-${i}`)));
+  }
+  // Cap was reached after TRIGGER_QUEUE_CAP items; the rest dropped.
+  const capReached = results.filter((r) => r.droppedCount > 0).length;
+  assert.equal(
+    capReached,
+    50,
+    "exactly the overflow items should report droppedCount > 0",
+  );
+  // Every dropped item is from the queue head: the first 50 items we
+  // enqueued are the ones that get evicted (FIFO).
+  const allDroppedFrom = results
+    .slice(TRIGGER_QUEUE_CAP)
+    .flatMap((r) => r.droppedSamples.map((it) => it.from.metroName));
+  assert.equal(allDroppedFrom.length, 50);
+  assert.deepEqual(
+    allDroppedFrom.slice(0, 5),
+    [
+      "Blue-0",
+      "Blue-1",
+      "Blue-2",
+      "Blue-3",
+      "Blue-4",
+    ],
+    "dropped samples are the oldest queued items, FIFO",
+  );
+  // Sample buffer is itself bounded at 5 items per call.
+  for (const r of results) {
+    assert.ok(
+      r.droppedSamples.length <= 5,
+      "droppedSamples is capped at 5 per call",
+    );
+  }
+  // Cleanup: shutdown drops everything so the busy-retry drain doesn't
+  // outlive the test process.
+  b.shutdown();
 });
 
 test("TriggerBuffer: shutdown() cancels the debounce and discards queued items", async () => {

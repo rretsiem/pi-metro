@@ -66,7 +66,7 @@ and any new tests must be added in the same commit.
 
 ### Batch B — TriggerBuffer queue cap (~45 min)
 
-- [ ] **B1. `TriggerBuffer.queue` cap at 200** — `src/triggers.ts:43`. A
+- [x] **B1. `TriggerBuffer.queue` cap at 200** — `src/triggers.ts:43`. A
       malicious peer can queue 1M items during a 60s idle wait, then take
       hours of sequential 20-item batches to drain. Add a `TRIGGER_QUEUE_CAP`
       constant, drop the oldest item on overflow, append a `metrol:in`

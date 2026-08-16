@@ -14,6 +14,15 @@ export const TRIGGER_RETRY_MS = 500;
 export const TRIGGER_RETRY_CAP = 120;
 export const TRIGGER_BATCH_MAX_ITEMS = 20;
 export const TRIGGER_BATCH_MAX_BYTES = 16 * 1024;
+/**
+ * Maximum number of items the trigger buffer may queue while waiting for
+ * the receiver to become idle. Above this size, incoming items are
+ * dropped (FIFO: oldest first) to bound per-runtime memory and prevent a
+ * malicious peer from piling millions of messages during a 60-second
+ * idle wait. The caller is told how many were dropped via
+ * `TriggerEnqueueResult` so the user can see the loss in the inbox log.
+ */
+export const TRIGGER_QUEUE_CAP = 200;
 
 /** Invisible-to-the-model marker prepended to every batched prompt. */
 export const TRIGGER_MARKER = "[metrol-trigger]";
@@ -29,6 +38,19 @@ export interface TriggerBatch {
   items: TriggerItem[];
   /** UTF-8 byte length of the combined content (excludes marker/label text). */
   bytes: number;
+}
+
+/** Outcome of `enqueue`. The caller logs dropped items so the user can
+ * see when the buffer overflowed (otherwise drops are silent). */
+export interface TriggerEnqueueResult {
+  accepted: boolean;
+  /** Number of items dropped from the queue head to make room for the
+   * newly accepted item. Zero unless `accepted === true` AND the queue
+   * was already at `TRIGGER_QUEUE_CAP` on enqueue. */
+  droppedCount: number;
+  /** Sample of the dropped items (up to 5), so the caller can attribute
+   * the loss in the inbox log. */
+  droppedSamples: TriggerItem[];
 }
 
 /** Outcome tag the delivery callback reports. */
@@ -92,10 +114,37 @@ export class TriggerBuffer {
    * Add a peer message to the buffer. If nothing is in flight, arms the
    * 200ms debounce window from this item. Otherwise, appends to the queue
    * and lets the in-flight drain pick it up in the next batch.
+   *
+   * When the queue is already at `TRIGGER_QUEUE_CAP`, the oldest queued
+   * item is dropped (FIFO) to make room for the new one. Returns a
+   * `TriggerEnqueueResult` describing how many items were dropped and a
+   * small sample so the caller can log the overflow.
    */
-  enqueue(item: TriggerItem): void {
+  enqueue(item: TriggerItem): TriggerEnqueueResult {
+    const droppedSamples: TriggerItem[] = [];
+    let droppedCount = 0;
+    if (this.queue.length >= TRIGGER_QUEUE_CAP) {
+      // FIFO eviction: drop the oldest item, log up to 5 samples. The
+      // sample buffer is itself bounded so a stream of overflow events
+      // doesn't itself grow unbounded.
+      const evicted = this.queue.shift()!;
+      droppedSamples.push(evicted);
+      droppedCount = 1;
+      // After the initial shift the queue is at CAP-1; we still need room
+      // for the new item. If subsequent evictions were required (shouldn't
+      // happen since CAP is bounded), log them.
+      while (
+        droppedSamples.length < 5 &&
+        this.queue.length >= TRIGGER_QUEUE_CAP
+      ) {
+        const moreEvicted = this.queue.shift()!;
+        droppedSamples.push(moreEvicted);
+        droppedCount++;
+      }
+    }
     this.queue.push(item);
     this.scheduleDebounce();
+    return { accepted: true, droppedCount, droppedSamples };
   }
 
   /** Items currently waiting to be delivered (excludes in-flight batches). */
