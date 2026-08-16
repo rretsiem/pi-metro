@@ -52,13 +52,9 @@ and any new tests must be added in the same commit.
 
 ### Batch A — quick wins (~30 min total)
 
-- [ ] **A1. `broadcast` parallelize** — `Promise.all(recipients.map(sendChat))`
-      in `src/messaging.ts:48-67`. Sequential writes are a real latency hit
-      for N-peer broadcasts (e.g., 50 peers = ~50× single-disk-write latency).
-      One-line change, atomic-write semantics already correct.
-      - Test: extend `test/messaging.test.ts` with a parallel-broadcast
-        test asserting the same final state as the existing sequential
-        test (no functional regression).
+- [x] **A1. `broadcast` parallelize** — `Promise.all(recipients.map(sendChat))`
+      in `src/messaging.ts:48-67`. Shipped [commit 7160c90](https://github.com/rretsiem/pi-metro/commit/7160c90),
+      232/232 tests passing. One new regression test added.
 - [ ] **A2. `dispatcher.seen` FIFO cap at 10k** — `src/dispatcher.ts:33`.
       Unbounded `Set<string>` growth → slow `Set.has` after ~1M messages.
       Cap + FIFO evict when at capacity, drop the oldest entry. No new
