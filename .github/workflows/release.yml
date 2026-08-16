@@ -23,4 +23,6 @@ jobs:
       - name: Run tests
         run: npm test
       - name: Publish to npm
-        run: npm publish --access public --token ${{ secrets.NPMJS_PUBLISH_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPMJS_PUBLISH_TOKEN }}" > .npmrc
+          npm publish --access public
