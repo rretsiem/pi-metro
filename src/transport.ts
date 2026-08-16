@@ -20,6 +20,7 @@ export const MESSAGE_TYPES = [
   "trigger",
   "compactReq",
   "compactRes",
+  "cancel",
 ] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 

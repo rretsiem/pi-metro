@@ -22,6 +22,8 @@ export interface DispatcherCallbacks {
   onCompactRequest?(msg: Message): void | Promise<void>;
   /** Sender-side: late compactRes arriving with no registered waiter (Task 09). */
   onCompactResponse?(msg: Message): void | Promise<void>;
+  /** Receiver-side: a sender wants to cancel one of our running or queued asks. */
+  onCancel?(msg: Message): void | Promise<void>;
 }
 
 export interface ReplyResult {
@@ -229,6 +231,12 @@ export class InboxDispatcher {
         // register into via awaitReply). Always route to the callback, which
         // resolves the compact-specific map.
         await this.cb.onCompactResponse?.(msg);
+        break;
+      case "cancel":
+        // Best-effort supersession. Receiver's onCancel decides whether the
+        // ask is still queued (drop it) or already running (mark cancelled,
+        // discard the late natural reply).
+        await this.cb.onCancel?.(msg);
         break;
     }
   }

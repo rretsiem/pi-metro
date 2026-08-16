@@ -555,6 +555,7 @@ test("post-integration: transport/dispatcher expose the wired trigger surface; t
       "trigger",
       "compactReq",
       "compactRes",
+      "cancel",
     ],
   );
   // dispatcher exposes the post-integration callback surface, including

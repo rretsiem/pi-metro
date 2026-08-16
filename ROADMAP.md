@@ -78,6 +78,20 @@ No open S-tier items. Next code work is the M-tier list below. Tagging
       - Test: `test/delegate.test.ts` — 9 cases: no-idle-peer, auto-pick,
         hint-forces-target, blocking waits for terminal states (answered,
         failed, timeout), scope=all.
+- [x] **E2. `metro_cancel` (best-effort ask cancellation)** —
+      `src/asks.ts` + `src/dispatcher.ts` + `src/transport.ts` + `src/index.ts`.
+      Adds the `cancel` message type, `AskQueue.remove(predicate)`,
+      receiver-side `onCancel` (drops queued asks; marks running asks
+      cancelled and discards the natural reply), and a sender-side
+      `metro_cancel` tool. Adds `cancelled` to `FailReason`. Best-effort:
+      cannot interrupt the LLM run on the receiver side from the bus
+      (no platform integration); the run continues locally but the sender
+      is told the ask failed with reason=cancelled and any late reply is
+      discarded as superseded.
+      - Test: `test/cancel.test.ts` — 9 cases: AskQueue.remove
+        semantics, dispatcher routes cancel, cancel before accept (queued
+        drop + fail), cancel during run (mid-run supersession + late
+        reply discarded), unknown requestId, malformed payload.
 - [ ] **M1. `metro_log` (audit trail)** — every outbound write + every
       inbound route gets a single-line log entry under `metrol:log` for
       debugging cross-process issues. New `src/log.ts` + small integration

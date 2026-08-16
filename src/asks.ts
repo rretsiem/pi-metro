@@ -30,7 +30,8 @@ export type FailReason =
   | "deadline_exceeded"
   | "target_gone"
   | "run_failed"
-  | "no_response";
+  | "no_response"
+  | "cancelled";
 
 /** Persisted `metrol:request` entry; also used by fixed queries (kind set). */
 export interface RequestRecord {
@@ -66,6 +67,15 @@ export interface FailPayload {
   status: "failed";
   reason: FailReason;
   error?: string;
+}
+
+/** Payload of a `cancel` message. Sender requests supersession of an
+ * outstanding ask; receiver marks it cancelled and discards any natural
+ * reply. Best-effort: if the ask is already running, the LLM run cannot
+ * be aborted from the bus (no platform integration). */
+export interface CancelPayload {
+  requestId: string;
+  reason?: string;
 }
 
 /** Max reply payload size. Replies larger than this are truncated with `truncated: true`. */
@@ -268,6 +278,20 @@ export class AskQueue<T> {
 
   get isActive(): boolean {
     return this.busy;
+  }
+
+  /**
+   * Drop the first waiting item matching `predicate`. Returns the dropped
+   * item, or `undefined` if no waiting item matched. The currently-running
+   * item is NOT removable from here — the caller tracks it separately and
+   * consults its own cancelled-set before letting the natural completion
+   * land.
+   */
+  remove(predicate: (item: T) => boolean): T | undefined {
+    const idx = this.waiting.findIndex(predicate);
+    if (idx === -1) return undefined;
+    const [item] = this.waiting.splice(idx, 1);
+    return item;
   }
 
   private async pump(): Promise<void> {

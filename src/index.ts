@@ -12,6 +12,7 @@ import {
   writeRegistryEntry,
   updateRegistry,
   removeRegistryEntry,
+  pidAlive,
   type RegistryEntry,
 } from "./registry.ts";
 import {
@@ -34,7 +35,7 @@ import {
   formatMetroStatus,
 } from "./presentation.ts";
 import { sendDirect, broadcast } from "./messaging.ts";
-import { safeInboxDir } from "./transport.ts";
+import { safeInboxDir, writeMessage } from "./transport.ts";
 import {
   claimLease,
   leaseNameForPath,
@@ -65,6 +66,7 @@ import {
   sendFail,
   sendProgress,
   type AskOutcome,
+  type CancelPayload,
   type FailReason,
   type LivenessMonitor,
   type RequestRecord,
@@ -991,6 +993,96 @@ export default function metrol(pi: PiLike) {
   });
 
   pi.registerTool({
+    name: "metro_cancel",
+    label: "Metro Cancel",
+    description:
+      "Cancel an outstanding ask by requestId. Best-effort: if the receiver hasn't started yet, the ask is dropped from its queue and the sender is told it failed with reason=cancelled. If the receiver is mid-run, the run continues locally but the sender is told it failed; any natural reply is discarded as superseded. If the ask is already terminal, no-op.",
+    parameters: Type.Object({
+      requestId: Type.String(),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!selfEntry) {
+        return {
+          content: [{ type: "text", text: "metrol not started yet" }],
+          details: { error: "not_started" },
+        };
+      }
+      // Look up the original target from the persisted request entry.
+      const found = findRequest(ctx.sessionManager.getEntries(), params.requestId);
+      if (!found.ok) {
+        return {
+          content: [{ type: "text", text: found.error }],
+          details: { error: "request_not_found", requestId: params.requestId },
+        };
+      }
+      const targetName = found.request.target;
+      // Resolve the target's instanceId. The registry may have stale entries
+      // (a peer that died since the ask was issued), in which case we record
+      // the cancel locally and rely on the liveness monitor to terminate.
+      const entries = await readRegistry(rootDir);
+      const live = entries.filter(
+        (e) => e.metroName === targetName && pidAlive(e.pid),
+      );
+      const liveTarget = live[0];
+      // Persist the cancelled status locally regardless of whether the
+      // receiver is reachable, so the LLM sees the supersession in its log.
+      pi.appendEntry("metrol:request", {
+        requestId: params.requestId,
+        target: targetName,
+        status: "failed",
+        reason: "cancelled" as FailReason,
+        error: "cancelled by sender",
+        updatedAt: Date.now(),
+      });
+      // Stop the local liveness monitor if any.
+      stopOutgoingAskMonitor(params.requestId);
+      if (!liveTarget) {
+        return {
+          content: [
+            { type: "text", text: `cancelled locally; target ${targetName} not live` },
+          ],
+          details: { cancelled: true, target: targetName, delivered: false },
+        };
+      }
+      // Write a cancel message to the receiver's inbox.
+      const cancelMsg: Message = {
+        version: 1,
+        id: randomUUID(),
+        type: "cancel",
+        correlationId: params.requestId,
+        from: {
+          instanceId: selfEntry.instanceId,
+          metroName: selfEntry.metroName,
+          sessionName: selfEntry.sessionName,
+        },
+        toInstanceId: liveTarget.instanceId,
+        payload: {
+          requestId: params.requestId,
+          reason: "cancelled by sender",
+        } satisfies CancelPayload,
+        timestamp: Date.now(),
+      };
+      const dir = await safeInboxDir(rootDir, liveTarget.instanceId);
+      const w = await writeMessage(dir, cancelMsg);
+      if (!w.ok) {
+        return {
+          content: [{ type: "text", text: `cancel write failed: ${w.error}` }],
+          details: { error: "write_failed", requestId: params.requestId },
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ cancelled: true, target: targetName, requestId: params.requestId }),
+          },
+        ],
+        details: { cancelled: true, target: targetName, requestId: params.requestId },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "metro_compact",
     label: "Metro Compact",
     description:
@@ -1140,8 +1232,20 @@ export default function metrol(pi: PiLike) {
     // Incoming ask FIFO: one active ask at a time. The run injects the ask
     // as a user message, waits for that request's run to settle (matched by
     // the marker in the injected prompt), then replies and persists state.
+    // Cancellation: incoming metro_cancel messages mark a requestId as
+    // superseded. The set is checked both when an ask is enqueued (drop the
+    // queued item before it starts) and when a running ask naturally
+    // completes (discard the late reply).
+    const cancelledAsks = new Set<string>();
+    // The currently-running incoming ask (if any). Set by runIncomingAsk
+    // before it starts, cleared in `finally` — used by onCancel to send a
+    // fail back to the original sender without re-resolving it.
+    let runningIncomingAsk: IncomingAsk | null = null;
+
     const runIncomingAsk = async (item: IncomingAsk): Promise<void> => {
       if (!selfEntry) return;
+      runningIncomingAsk = item;
+      try {
       const { msg, requestId, question } = item;
       const persist = (status: RequestRecord["status"], extra: Partial<RequestRecord> = {}) =>
         pi.appendEntry("metrol:request", {
@@ -1152,6 +1256,13 @@ export default function metrol(pi: PiLike) {
           updatedAt: Date.now(),
           ...extra,
         });
+      // Race-safety: a cancel arriving between enqueue and run lands here.
+      // Drop the ask immediately and tell the sender.
+      if (cancelledAsks.has(requestId)) {
+        cancelledAsks.delete(requestId);
+        await sendFail(rootDir, selfEntry, msg, requestId, "cancelled", "cancelled by sender");
+        return;
+      }
       persist("running");
       // Informational ping so the sender's liveness monitor resets its clock
       // and can persist "running" — best-effort, never blocks the ask flow.
@@ -1193,12 +1304,22 @@ export default function metrol(pi: PiLike) {
         }, ASK_DEADLINE_MS);
         deadline.unref?.();
       });
+      // Cancellation supersedes the natural completion: drop the late
+      // persist + reply, even if the LLM ran to completion. The set entry
+      // is consumed here.
+      if (cancelledAsks.has(requestId)) {
+        cancelledAsks.delete(requestId);
+        return;
+      }
       if (outcome.status === "answered") {
         persist("answered", { reply: outcome.reply });
       } else {
         persist("failed", { error: outcome.error });
       }
       await replyAsk(rootDir, selfEntry, msg, outcome);
+      } finally {
+        if (runningIncomingAsk === item) runningIncomingAsk = null;
+      }
     };
     askQueue = new AskQueue<IncomingAsk>(runIncomingAsk);
 
@@ -1391,6 +1512,66 @@ export default function metrol(pi: PiLike) {
         // compact.ts owns its own correlation map, independent of this
         // dispatcher's internal `pending` — always forward here.
         compactPending.resolve(msg);
+      },
+      onCancel: async (msg) => {
+        // Best-effort cancel. We cannot interrupt the LLM run on the
+        // receiver side from the bus (no platform integration for that),
+        // so cancellation is supersession: the ask is marked terminal, the
+        // sender is told the request failed with reason "cancelled", and
+        // any late natural reply is discarded when it lands.
+        if (!selfEntry) return;
+        const p = msg.payload as { requestId?: unknown } | null;
+        const requestId = typeof p?.requestId === "string" ? p.requestId : null;
+        if (!requestId) return;
+        // Drop from the queue if still waiting; this also returns the
+        // item so we can reply-fail to the original sender.
+        const dropped = askQueue?.remove((x) => x.requestId === requestId);
+        if (dropped) {
+          try {
+            await sendFail(
+              rootDir,
+              selfEntry,
+              dropped.msg,
+              requestId,
+              "cancelled",
+              "cancelled by sender",
+            );
+          } catch {
+            // best-effort; the sender's liveness monitor is the safety net
+          }
+          return;
+        }
+        // Not in the queue — either currently running, or already terminal.
+        // Mark cancelled so runIncomingAsk discards the natural reply, then
+        // reply-fail to the sender so its liveness monitor stops.
+        cancelledAsks.add(requestId);
+        const running = runningIncomingAsk;
+        if (running && running.requestId === requestId) {
+          // Synthesize a Message-like object the sendFail helper can use
+          // to write to the original sender's inbox. We have the original
+          // sender identity (running.msg.from) but the original msg.id is
+          // the correlation we need. sendFail only reads payload + from;
+          // it doesn't validate msg.id.
+          const synth = {
+            ...running.msg,
+            id: requestId,
+          } as Message;
+          try {
+            await sendFail(
+              rootDir,
+              selfEntry,
+              synth,
+              requestId,
+              "cancelled",
+              "cancelled by sender (mid-run; run continues locally)",
+            );
+          } catch {
+            // best-effort
+          }
+        }
+        // If not running either, the request was already terminal; nothing
+        // to do. applyRankedTransition on the sender side would discard the
+        // cancel anyway.
       },
       },
       { onWakeUp: () => { void dispatcher?.poll(); } },
