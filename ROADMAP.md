@@ -16,8 +16,7 @@ Status legend: `[ ]` pending · `[~]` in progress · `[x]` shipped in the listed
 
 - All nine roadmap enhancements wired end to end (Tasks 01–09).
 - 191 tests, 100% passing on macOS/Linux/Windows CI.
-- GitHub repo `github.com/rretsiem/pi-metro` (currently private, pending
-  publish to npm + flip to public).
+- GitHub repo `github.com/rretsiem/pi-metro` (public).
 
 ### v0.2.1 — landed on `main`, not tagged (2026-08-16)
 

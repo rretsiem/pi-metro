@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased (0.2.1 on `main`, not tagged)
+## 0.2.1 - 2026-08-16
 
-Pre-publish hardening plus the v0.2.1 roadmap batches. 244 tests.
+Pre-publish hardening plus the v0.2.1 roadmap batches. 262 tests, all passing
+on macOS / Linux / Windows CI (Node 22).
 
 - Per-file lease coordination: structured `write`/`edit` calls block on
   conflicts, with `metro_claim` and `metro_release` for multi-step edits.
@@ -22,6 +23,13 @@ Pre-publish hardening plus the v0.2.1 roadmap batches. 244 tests.
 - `METROL_DISABLE_SWEEP` skips startup and periodic storage sweeps.
 - Inbox poll skip uses an mtime + file-count + total-size fingerprint (NFS/FAT
   mtime rewind no longer hides new mail).
+- `metro_delegate` wrapper composes `metro_select_peer` + `metro_ask` into one
+  call; honors `targetHint`, auto-picks idle peer with lowest context usage,
+  optionally blocks for the reply. Adds a `metrol:handoff` audit entry.
+- `metro_cancel` sends a best-effort cancel: queued asks are dropped, running
+  asks are superseded (natural reply discarded). New `cancel` message type;
+  `cancelled` added to `FailReason`; `AskQueue.remove(predicate)` for queue
+  cancellation.
 
 ## 0.2.0 - 2026-08-16
 

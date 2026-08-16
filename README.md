@@ -1,5 +1,7 @@
 # pi-metro (Metrol)
 
+[![test](https://github.com/rretsiem/pi-metro/actions/workflows/test.yml/badge.svg)](https://github.com/rretsiem/pi-metro/actions/workflows/test.yml)
+
 ![pi-metro — Metrol inter-session message bus](https://repository-images.githubusercontent.com/1335506315/bf307e83-aecf-4f31-b67b-0c87a3e63f27)
 
 Metrol is a local message bus for [Pi coding agent](https://github.com/badlogic/pi-mono) sessions.
