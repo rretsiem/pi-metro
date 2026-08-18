@@ -4,6 +4,10 @@
 
 Identity claim reclaim and color derivation fixes. 266 tests passing.
 
+- `/reload` keeps the same alias: `storageSweepTimer` is function-scoped
+  so `session_shutdown` can finish and release the claim. A block-scoped
+  `const` used to throw `ReferenceError`, leave the old claim live (same
+  PID, fresh heartbeat), and mint `Red-N+1`.
 - Restart reclaims the previous alias: `session_start` now runs
   `staleClaimsCleanup` before `claimMetroAlias`, so a crashed
   predecessor's claim no longer bumps the new session to the next free

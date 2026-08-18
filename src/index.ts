@@ -1587,6 +1587,8 @@ export default function metrol(pi: PiLike) {
     );
     dispatcher.start();
 
+    // Function-scoped: session_shutdown closes over this. Block-scoped const threw on /reload.
+    let storageSweepTimer: ReturnType<typeof setInterval> | undefined;
     if (!isSweepDisabled()) {
       // Drop stale registry files, alias claims, and instance directories
       // left behind by crashed/shut-down neighbors. One snapshot of
@@ -1597,7 +1599,7 @@ export default function metrol(pi: PiLike) {
 
       // Periodic re-sweep so a long-running session doesn't accumulate stale
       // state from neighbors that died earlier in its lifetime.
-      const storageSweepTimer = setInterval(() => {
+      storageSweepTimer = setInterval(() => {
         void sweepMetrolStorage(rootDir);
       }, STORAGE_SWEEP_INTERVAL_MS);
       storageSweepTimer.unref();
