@@ -1158,7 +1158,15 @@ export default function metrol(pi: PiLike) {
     const siblingColor = live
       .find((e) => e.projectRoot === projectRoot)
       ?.metroName.split("-")[0];
-    const metroName = await claimMetroAlias(rootDir, instanceId, previousAlias, siblingColor);
+    // Live-alias snapshot (excluding self — defensive; self is not in `live`
+    // yet because the registry entry is written after claimMetroAlias).
+    // A live entry whose claim directory was swept must still keep its name.
+    const liveAliases = new Set(
+      live
+        .filter((e) => e.instanceId !== instanceId)
+        .map((e) => e.metroName),
+    );
+    const metroName = await claimMetroAlias(rootDir, instanceId, previousAlias, siblingColor, liveAliases);
 
     const sessionName: string | undefined = ctx.sessionManager.getSessionName();
     if (sessionName === undefined || sessionName === previousAlias) {

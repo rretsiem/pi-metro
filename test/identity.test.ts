@@ -144,3 +144,52 @@ test("a fresh session avoids a color another project holds at a higher run", asy
   const name = await claimMetroAlias(root, randomUUID(), undefined, undefined);
   assert.equal(name, "Blue-1");
 });
+
+test("rejects a candidate alias held by another live entry when its claim dir is absent", async (t) => {
+  const root = await withTempRoot(t);
+  // A live entry holds Red-1 but its claim directory is gone (e.g., partial
+  // sweep race). Without a live-aliases check, mkdir(Red-1) would succeed
+  // and steal the alias from the live session.
+  const liveAliases = new Set(["Red-1"]);
+  const name = await claimMetroAlias(
+    root,
+    randomUUID(),
+    undefined,
+    undefined,
+    liveAliases,
+  );
+  assert.notEqual(name, "Red-1", "live alias must not be allocated");
+});
+
+test("rejects a candidate previous alias held by another live entry", async (t) => {
+  const root = await withTempRoot(t);
+  // The new session's previous alias was Red-1, but another live entry
+  // now holds it. Even if the claim dir was wiped, the live-alias set must
+  // prevent reclaiming.
+  const liveAliases = new Set(["Red-1"]);
+  const name = await claimMetroAlias(
+    root,
+    randomUUID(),
+    "Red-1",
+    undefined,
+    liveAliases,
+  );
+  assert.notEqual(name, "Red-1");
+});
+
+test("legitimate same-instance reclaim is unaffected by the live-alias check", async (t) => {
+  const root = await withTempRoot(t);
+  const instanceId = randomUUID();
+  const first = await claimMetroAlias(root, instanceId);
+  // Caller filters self out of liveAliases (production invariant — self
+  // is not in the registry snapshot read before writeRegistryEntry).
+  const liveAliases = new Set<string>();
+  const reclaimed = await claimMetroAlias(
+    root,
+    instanceId,
+    first,
+    undefined,
+    liveAliases,
+  );
+  assert.equal(reclaimed, first);
+});

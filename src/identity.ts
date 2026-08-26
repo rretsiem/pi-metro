@@ -58,15 +58,27 @@ export async function claimMetroAlias(
   instanceId: string,
   previousAlias?: string,
   siblingColor?: string,
+  liveAliases?: Set<string>,
 ): Promise<string> {
   await mkdir(claimsDir(rootDir), { recursive: true });
-  if (previousAlias && (await tryClaim(rootDir, previousAlias, instanceId))) {
-    return previousAlias;
+  // Live-alias collision guard: a candidate name already held by another
+  // live registry entry must not be allocated even if its claim dir is
+  // absent (sweep race, manual cleanup). Same-instance reclaim still works
+  // — the on-disk owner === instanceId path inside tryClaim runs before
+  // this guard would matter, and a session reclaiming its own alias
+  // wouldn't be in `liveAliases` from the caller's perspective.
+  const heldByOther = (name: string) =>
+    liveAliases !== undefined && liveAliases.has(name);
+  if (previousAlias && !heldByOther(previousAlias)) {
+    if (await tryClaim(rootDir, previousAlias, instanceId)) {
+      return previousAlias;
+    }
   }
   // A live session in the same project: share its color, take the next free run.
   if (siblingColor && LINES.includes(siblingColor)) {
     for (let run = 1; run <= MAX_RUN; run++) {
       const name = `${siblingColor}-${run}`;
+      if (heldByOther(name)) continue;
       if (await tryClaim(rootDir, name, instanceId)) return name;
     }
   }
@@ -77,15 +89,18 @@ export async function claimMetroAlias(
   );
   for (const line of LINES) {
     if (used.has(line)) continue;
+    if (heldByOther(`${line}-1`)) continue;
     if (await tryClaim(rootDir, `${line}-1`, instanceId)) return `${line}-1`;
   }
   for (const line of LINES) {
+    if (heldByOther(`${line}-1`)) continue;
     if (await tryClaim(rootDir, `${line}-1`, instanceId)) return `${line}-1`;
   }
   // Every color's run 1 is taken: any free slot will do.
   for (const line of LINES) {
     for (let run = 2; run <= MAX_RUN; run++) {
       const name = `${line}-${run}`;
+      if (heldByOther(name)) continue;
       if (await tryClaim(rootDir, name, instanceId)) return name;
     }
   }
