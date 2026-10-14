@@ -142,6 +142,12 @@ The extension also registers these tools for Pi agents:
   way to make the target start working without a human typing);
 - `metro_query` — perform a fixed lookup on a peer;
 - `metro_ask` — send a context-aware question;
+- `metro_delegate` — send a task to an idle peer (lowest context usage
+  preferred, or `targetHint`) and optionally wait for the reply; it combines
+  `metro_select_peer` and `metro_ask`;
+- `metro_cancel` — cancel an outstanding ask by request ID (best effort: a
+  queued ask is dropped; a running one continues locally but its reply is
+  discarded);
 - `metro_read` — read a request's current state or reply; and
 - `metro_compact` — request context compaction from a peer.
 
@@ -179,6 +185,10 @@ same user can read or inject messages, so do not use it across trust boundaries.
 npm install
 npm test
 ```
+
+Node.js 20 or newer is required. Releases are published to npm by
+`.github/workflows/release.yml` on a version tag, using npm Trusted Publishing,
+with GitHub Release notes taken from `CHANGELOG.md`.
 
 The tests use Node's built-in test runner with `tsx` and do not require a
 network service; watcher coverage uses temporary local directories.
